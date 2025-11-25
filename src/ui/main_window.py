@@ -1,0 +1,1351 @@
+"""
+Main Window - the primary UI for the Excel Workflow Tool
+"""
+
+import os
+import sys
+import json
+import copy
+from pathlib import Path
+from typing import Optional, List, Dict, Any
+from datetime import datetime
+
+from PyQt6.QtWidgets import (
+    QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
+    QSplitter, QMenuBar, QMenu, QToolBar, QStatusBar,
+    QFileDialog, QMessageBox, QLabel, QPushButton,
+    QDockWidget, QListWidget, QListWidgetItem, QFrame,
+    QScrollArea, QSizePolicy, QLineEdit, QApplication
+)
+from PyQt6.QtCore import Qt, QSize, QMimeData, QPoint, QSettings
+from PyQt6.QtGui import QAction, QIcon, QDrag, QColor, QPalette, QPixmap, QFont, QPainter
+
+# Add parent directory to path for imports
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+
+from src.workflow.engine import Workflow
+from src.nodes.node_registry import NodeRegistry
+from src.nodes import excel_nodes  # Import to register nodes
+from src.ui.canvas import WorkflowCanvas
+from src.ui.node_config import NodeConfigPanel
+from src.ui.data_preview import DataPreviewPanel
+from src.ui.about_dialog import AboutDialog
+
+
+class NodeListItem(QListWidgetItem):
+    """Custom list item for node palette"""
+    
+    def __init__(self, node_class):
+        super().__init__(node_class.node_name)
+        self.node_class = node_class
+        self.node_type = node_class.node_type
+
+
+class DraggableNodeList(QListWidget):
+    """List widget with drag support for nodes"""
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setDragEnabled(True)
+        self.setDragDropMode(QListWidget.DragDropMode.DragOnly)
+    
+    def startDrag(self, supportedActions):
+        """Start drag operation with node type data"""
+        try:
+            item = self.currentItem()
+            if isinstance(item, NodeListItem):
+                drag = QDrag(self)
+                mime_data = QMimeData()
+                # Store node type in mime data
+                mime_data.setText(item.node_type)
+                mime_data.setData("application/x-workflow-node", item.node_type.encode())
+                drag.setMimeData(mime_data)
+                
+                # Create drag pixmap
+                pixmap = QPixmap(160, 40)
+                pixmap.fill(QColor(item.node_class.node_color))
+                
+                from PyQt6.QtGui import QPainter as QPainterDrag
+                painter = QPainterDrag(pixmap)
+                painter.setPen(QColor("white"))
+                font = QFont("Segoe UI", 10, QFont.Weight.Bold)
+                painter.setFont(font)
+                painter.drawText(pixmap.rect(), Qt.AlignmentFlag.AlignCenter, item.node_class.node_name)
+                painter.end()
+                
+                drag.setPixmap(pixmap)
+                drag.setHotSpot(QPoint(80, 20))
+                
+                drag.exec(Qt.DropAction.CopyAction)
+        except Exception as e:
+            print(f"Drag error: {e}")
+        
+
+class NodePalette(QDockWidget):
+    """Dock widget containing available nodes"""
+    
+    def __init__(self, parent=None):
+        super().__init__("节点列表", parent)
+        self.setAllowedAreas(Qt.DockWidgetArea.LeftDockWidgetArea | Qt.DockWidgetArea.RightDockWidgetArea)
+        
+        # Store all node items for filtering
+        self.all_node_items = []
+        
+        # Create main widget
+        main_widget = QWidget()
+        layout = QVBoxLayout(main_widget)
+        layout.setContentsMargins(5, 5, 5, 5)
+        
+        # Search box
+        self.search_box = QLineEdit()
+        self.search_box.setPlaceholderText("🔍 搜索节点...")
+        self.search_box.textChanged.connect(self._filter_nodes)
+        self.search_box.setStyleSheet("""
+            QLineEdit {
+                padding: 8px;
+                border: 1px solid #3d3d3d;
+                border-radius: 4px;
+                background-color: #2d2d2d;
+                color: #e0e0e0;
+            }
+            QLineEdit:focus {
+                border-color: #db0011;
+            }
+        """)
+        layout.addWidget(self.search_box)
+        
+        # Create draggable list widget for nodes
+        self.node_list = DraggableNodeList()
+        self.node_list.setSpacing(2)
+        
+        # Populate with nodes by category
+        self._populate_nodes()
+        
+        layout.addWidget(QLabel("拖拽或双击添加节点:"))
+        layout.addWidget(self.node_list)
+        
+        self.setWidget(main_widget)
+        self.setMinimumWidth(200)
+    
+    def _populate_nodes(self):
+        """Populate the node list"""
+        self.node_list.clear()
+        self.all_node_items = []
+        
+        categories = NodeRegistry.get_nodes_by_category()
+        for category, nodes in sorted(categories.items()):
+            # Add category header
+            header = QListWidgetItem(f"── {category} ──")
+            header.setFlags(Qt.ItemFlag.NoItemFlags)
+            header.setBackground(QColor("#2d2d2d"))
+            header.setForeground(QColor("#888888"))
+            header.setData(Qt.ItemDataRole.UserRole, "header")
+            self.node_list.addItem(header)
+            self.all_node_items.append((header, category, None))
+            
+            # Add nodes in this category
+            for node_class in nodes:
+                item = NodeListItem(node_class)
+                item.setToolTip(node_class.node_description)
+                # Set background color based on node color
+                color = QColor(node_class.node_color)
+                color.setAlpha(50)
+                item.setBackground(color)
+                self.node_list.addItem(item)
+                self.all_node_items.append((item, category, node_class))
+    
+    def _filter_nodes(self, text: str):
+        """Filter nodes based on search text"""
+        search_text = text.lower().strip()
+        
+        if not search_text:
+            # Show all items
+            for i in range(self.node_list.count()):
+                self.node_list.item(i).setHidden(False)
+            return
+        
+        # Track which categories have visible nodes
+        visible_categories = set()
+        
+        # First pass: find matching nodes
+        for item, category, node_class in self.all_node_items:
+            if node_class is not None:  # It's a node, not a header
+                # Search in node name and description
+                name_match = search_text in node_class.node_name.lower()
+                desc_match = search_text in node_class.node_description.lower()
+                type_match = search_text in node_class.node_type.lower()
+                
+                if name_match or desc_match or type_match:
+                    item.setHidden(False)
+                    visible_categories.add(category)
+                else:
+                    item.setHidden(True)
+        
+        # Second pass: show/hide category headers
+        for item, category, node_class in self.all_node_items:
+            if node_class is None:  # It's a header
+                item.setHidden(category not in visible_categories)
+
+
+class MainWindow(QMainWindow):
+    """Main application window"""
+    
+    def __init__(self):
+        super().__init__()
+        
+        self.workflow = Workflow()
+        self.current_file: Optional[str] = None
+        
+        # Undo/Redo history
+        self._undo_stack: List[Dict[str, Any]] = []
+        self._redo_stack: List[Dict[str, Any]] = []
+        self._max_history = 50  # Maximum undo steps
+        
+        # Theme state (True = dark, False = light)
+        self._is_dark_theme = True
+        
+        # Auto-save directory
+        self._auto_save_dir = Path(__file__).parent.parent.parent / "autosave"
+        self._auto_save_dir.mkdir(exist_ok=True)
+        
+        # Track if workflow has unsaved changes
+        self._has_unsaved_changes = False
+        
+        # Application settings
+        self._settings = QSettings("IBCN Finance", "Excel Workflow Tool")
+        
+        self._setup_ui()
+        self._setup_menu()
+        self._setup_toolbar()
+        self._setup_statusbar()
+        self._setup_branding()
+        
+        # Save initial state
+        self._save_state()
+        
+        self.setWindowTitle("IBCN Finance - Excel 工作流工具")
+        self.resize(1400, 900)
+        
+        # Restore saved settings (geometry, theme, etc.)
+        self._restore_settings()
+        
+        # Apply theme based on restored setting
+        if self._is_dark_theme:
+            self._apply_dark_theme()
+        else:
+            self._apply_light_theme()
+    
+    def _setup_ui(self):
+        """Set up the main UI layout"""
+        # Central widget with canvas
+        central_widget = QWidget()
+        central_layout = QVBoxLayout(central_widget)
+        central_layout.setContentsMargins(0, 0, 0, 0)
+        
+        # Create workflow canvas
+        self.canvas = WorkflowCanvas(self.workflow)
+        self.canvas.node_selected.connect(self._on_node_selected)
+        self.canvas.node_double_clicked.connect(self._on_node_double_clicked)
+        self.canvas.connection_created.connect(self._on_connection_created)
+        self.canvas.node_delete_requested.connect(self._on_node_delete_requested)
+        self.canvas.node_copy_requested.connect(self._on_node_copy_requested)
+        self.canvas.node_dropped.connect(self._on_node_dropped)
+        central_layout.addWidget(self.canvas)
+        
+        self.setCentralWidget(central_widget)
+        
+        # Node palette (left dock)
+        self.node_palette = NodePalette(self)
+        self.node_palette.node_list.itemDoubleClicked.connect(self._on_palette_item_double_clicked)
+        self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self.node_palette)
+        
+        # Node config panel (right dock)
+        self.config_dock = QDockWidget("节点配置", self)
+        self.config_panel = NodeConfigPanel()
+        self.config_panel.config_changed.connect(self._on_config_changed)
+        self.config_dock.setWidget(self.config_panel)
+        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.config_dock)
+        
+        # Data preview panel (bottom dock)
+        self.preview_dock = QDockWidget("数据预览", self)
+        self.preview_panel = DataPreviewPanel()
+        self.preview_dock.setWidget(self.preview_panel)
+        self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, self.preview_dock)
+        
+        # Set dock sizes
+        self.config_dock.setMinimumWidth(280)
+        self.preview_dock.setMinimumHeight(200)
+    
+    def _setup_menu(self):
+        """Set up menu bar"""
+        menubar = self.menuBar()
+        
+        # File menu
+        file_menu = menubar.addMenu("文件(&F)")
+        
+        new_action = QAction("新建工作流(&N)", self)
+        new_action.setShortcut("Ctrl+N")
+        new_action.triggered.connect(self._new_workflow)
+        file_menu.addAction(new_action)
+        
+        open_action = QAction("打开工作流(&O)...", self)
+        open_action.setShortcut("Ctrl+O")
+        open_action.triggered.connect(self._open_workflow)
+        file_menu.addAction(open_action)
+        
+        save_action = QAction("保存工作流(&S)", self)
+        save_action.setShortcut("Ctrl+S")
+        save_action.triggered.connect(self._save_workflow)
+        file_menu.addAction(save_action)
+        
+        save_as_action = QAction("另存为(&A)...", self)
+        save_as_action.setShortcut("Ctrl+Shift+S")
+        save_as_action.triggered.connect(self._save_workflow_as)
+        file_menu.addAction(save_as_action)
+        
+        file_menu.addSeparator()
+        
+        reload_action = QAction("刷新工作流(&R)", self)
+        reload_action.setShortcut("Ctrl+R")
+        reload_action.triggered.connect(self._reload_workflow)
+        file_menu.addAction(reload_action)
+        
+        file_menu.addSeparator()
+        
+        # Recent files submenu
+        self.recent_menu = QMenu("最近打开(&R)", self)
+        self._update_recent_menu()
+        file_menu.addMenu(self.recent_menu)
+        
+        file_menu.addSeparator()
+        
+        # Restart app
+        restart_action = QAction("重启应用(&T)", self)
+        restart_action.setShortcut("Ctrl+Shift+R")
+        restart_action.triggered.connect(self._restart_app)
+        file_menu.addAction(restart_action)
+        
+        exit_action = QAction("退出(&X)", self)
+        exit_action.setShortcut("Alt+F4")
+        exit_action.triggered.connect(self.close)
+        file_menu.addAction(exit_action)
+        
+        # Edit menu
+        edit_menu = menubar.addMenu("编辑(&E)")
+        
+        self.undo_action = QAction("撤销(&U)", self)
+        self.undo_action.setShortcut("Ctrl+Z")
+        self.undo_action.triggered.connect(self._undo)
+        self.undo_action.setEnabled(False)
+        edit_menu.addAction(self.undo_action)
+        
+        self.redo_action = QAction("重做(&R)", self)
+        self.redo_action.setShortcut("Ctrl+Y")
+        self.redo_action.triggered.connect(self._redo)
+        self.redo_action.setEnabled(False)
+        edit_menu.addAction(self.redo_action)
+        
+        edit_menu.addSeparator()
+        
+        delete_action = QAction("删除选中(&D)", self)
+        delete_action.setShortcut("Delete")
+        delete_action.triggered.connect(self._delete_selected)
+        edit_menu.addAction(delete_action)
+        
+        # Run menu
+        run_menu = menubar.addMenu("运行(&R)")
+        
+        run_action = QAction("执行工作流(&E)", self)
+        run_action.setShortcut("F6")
+        run_action.triggered.connect(self._execute_workflow)
+        run_menu.addAction(run_action)
+        
+        # View menu
+        view_menu = menubar.addMenu("视图(&V)")
+        
+        view_menu.addAction(self.node_palette.toggleViewAction())
+        view_menu.addAction(self.config_dock.toggleViewAction())
+        view_menu.addAction(self.preview_dock.toggleViewAction())
+        
+        view_menu.addSeparator()
+        
+        # Theme toggle
+        self.theme_action = QAction("🌙 切换到浅色模式", self)
+        self.theme_action.setShortcut("Ctrl+T")
+        self.theme_action.triggered.connect(self._toggle_theme)
+        view_menu.addAction(self.theme_action)
+        
+        # Help menu
+        help_menu = menubar.addMenu("帮助(&H)")
+        
+        shortcuts_action = QAction("快捷键列表(&K)", self)
+        shortcuts_action.setShortcut("Ctrl+/")
+        shortcuts_action.triggered.connect(self._show_shortcuts)
+        help_menu.addAction(shortcuts_action)
+        
+        help_menu.addSeparator()
+        
+        about_action = QAction("关于(&A)...", self)
+        about_action.triggered.connect(self._show_about)
+        help_menu.addAction(about_action)
+    
+    def _setup_toolbar(self):
+        """Set up toolbar"""
+        toolbar = QToolBar("Main Toolbar")
+        toolbar.setMovable(False)
+        toolbar.setIconSize(QSize(24, 24))
+        self.addToolBar(toolbar)
+        
+        # Add IBCN Finance branding with logo
+        brand_widget = QWidget()
+        brand_layout = QHBoxLayout(brand_widget)
+        brand_layout.setContentsMargins(10, 0, 20, 0)
+        brand_layout.setSpacing(8)
+        
+        # Logo
+        logo_label = QLabel()
+        logo_path = Path(__file__).parent.parent.parent / "assets" / "logo.png"
+        if logo_path.exists():
+            pixmap = QPixmap(str(logo_path))
+            scaled_pixmap = pixmap.scaled(32, 32, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+            logo_label.setPixmap(scaled_pixmap)
+        else:
+            logo_label.setText("◆")
+            logo_label.setStyleSheet("color: #db0011; font-size: 20px;")
+        brand_layout.addWidget(logo_label)
+        
+        # Brand name (save as class attribute for theme switching)
+        self.brand_name_label = QLabel("IBCN Finance")
+        self._update_brand_style(dark=True)
+        brand_layout.addWidget(self.brand_name_label)
+        
+        toolbar.addWidget(brand_widget)
+        toolbar.addSeparator()
+        
+        # New button
+        new_btn = QPushButton("📄 新建")
+        new_btn.setToolTip("新建工作流 (Ctrl+N)")
+        new_btn.clicked.connect(self._new_workflow)
+        toolbar.addWidget(new_btn)
+        
+        # Open button
+        open_btn = QPushButton("📂 打开")
+        open_btn.setToolTip("打开工作流 (Ctrl+O)")
+        open_btn.clicked.connect(self._open_workflow)
+        toolbar.addWidget(open_btn)
+        
+        # Save button
+        save_btn = QPushButton("💾 保存")
+        save_btn.setToolTip("保存工作流 (Ctrl+S)")
+        save_btn.clicked.connect(self._save_workflow)
+        toolbar.addWidget(save_btn)
+        
+        # Reload button
+        reload_btn = QPushButton("🔄 刷新")
+        reload_btn.setToolTip("刷新当前工作流 (Ctrl+R)")
+        reload_btn.clicked.connect(self._reload_workflow)
+        toolbar.addWidget(reload_btn)
+        
+        toolbar.addSeparator()
+        
+        # Undo button
+        self.undo_btn = QPushButton("↩ 撤销")
+        self.undo_btn.setToolTip("撤销 (Ctrl+Z)")
+        self.undo_btn.clicked.connect(self._undo)
+        self.undo_btn.setEnabled(False)
+        toolbar.addWidget(self.undo_btn)
+        
+        # Redo button
+        self.redo_btn = QPushButton("↪ 重做")
+        self.redo_btn.setToolTip("重做 (Ctrl+Y)")
+        self.redo_btn.clicked.connect(self._redo)
+        self.redo_btn.setEnabled(False)
+        toolbar.addWidget(self.redo_btn)
+        
+        toolbar.addSeparator()
+        
+        # Run button
+        run_btn = QPushButton("▶️ 执行")
+        run_btn.setStyleSheet("QPushButton { background-color: #22c55e; color: white; font-weight: bold; }")
+        run_btn.clicked.connect(self._execute_workflow)
+        toolbar.addWidget(run_btn)
+        
+        toolbar.addSeparator()
+        
+        # Zoom controls
+        zoom_in_btn = QPushButton("🔍 放大")
+        zoom_in_btn.clicked.connect(lambda: self.canvas.zoom(1.2))
+        toolbar.addWidget(zoom_in_btn)
+        
+        zoom_out_btn = QPushButton("🔍 缩小")
+        zoom_out_btn.clicked.connect(lambda: self.canvas.zoom(0.8))
+        toolbar.addWidget(zoom_out_btn)
+        
+        fit_btn = QPushButton("⊡ 适应")
+        fit_btn.clicked.connect(self.canvas.fit_to_view)
+        toolbar.addWidget(fit_btn)
+        
+        toolbar.addSeparator()
+        
+        # Theme toggle button
+        self.theme_btn = QPushButton("🌙 浅色")
+        self.theme_btn.setToolTip("切换浅色/深色模式 (Ctrl+T)")
+        self.theme_btn.clicked.connect(self._toggle_theme)
+        toolbar.addWidget(self.theme_btn)
+    
+    def _setup_statusbar(self):
+        """Set up status bar"""
+        self.statusbar = QStatusBar()
+        self.setStatusBar(self.statusbar)
+        self.statusbar.showMessage("就绪")
+    
+    def _apply_dark_theme(self):
+        """Apply dark theme to the application"""
+        self.setStyleSheet("""
+            QMainWindow, QWidget {
+                background-color: #1e1e1e;
+                color: #e0e0e0;
+            }
+            QMenuBar {
+                background-color: #2d2d2d;
+                color: #e0e0e0;
+            }
+            QMenuBar::item:selected {
+                background-color: #3d3d3d;
+            }
+            QMenu {
+                background-color: #2d2d2d;
+                color: #e0e0e0;
+                border: 1px solid #3d3d3d;
+            }
+            QMenu::item:selected {
+                background-color: #4d4d4d;
+            }
+            QToolBar {
+                background-color: #2d2d2d;
+                border: none;
+                spacing: 5px;
+                padding: 5px;
+            }
+            QPushButton {
+                background-color: #3d3d3d;
+                color: #e0e0e0;
+                border: 1px solid #4d4d4d;
+                padding: 5px 10px;
+                border-radius: 3px;
+            }
+            QPushButton:hover {
+                background-color: #4d4d4d;
+            }
+            QPushButton:pressed {
+                background-color: #5d5d5d;
+            }
+            QDockWidget {
+                color: #e0e0e0;
+                titlebar-close-icon: none;
+            }
+            QDockWidget::title {
+                background-color: #2d2d2d;
+                padding: 5px;
+            }
+            QListWidget {
+                background-color: #252525;
+                color: #e0e0e0;
+                border: 1px solid #3d3d3d;
+            }
+            QListWidget::item {
+                padding: 5px;
+            }
+            QListWidget::item:selected {
+                background-color: #4d4d4d;
+            }
+            QListWidget::item:hover {
+                background-color: #3d3d3d;
+            }
+            QLineEdit, QTextEdit, QSpinBox, QComboBox {
+                background-color: #2d2d2d;
+                color: #e0e0e0;
+                border: 1px solid #3d3d3d;
+                padding: 5px;
+            }
+            QLabel {
+                color: #e0e0e0;
+            }
+            QStatusBar {
+                background-color: #2d2d2d;
+                color: #888888;
+            }
+            QTableWidget {
+                background-color: #252525;
+                color: #e0e0e0;
+                gridline-color: #3d3d3d;
+            }
+            QTableWidget::item {
+                padding: 5px;
+            }
+            QHeaderView::section {
+                background-color: #2d2d2d;
+                color: #e0e0e0;
+                padding: 5px;
+                border: 1px solid #3d3d3d;
+            }
+            QScrollBar:vertical {
+                background-color: #2d2d2d;
+                width: 12px;
+            }
+            QScrollBar::handle:vertical {
+                background-color: #4d4d4d;
+                border-radius: 6px;
+                min-height: 20px;
+            }
+            QScrollBar:horizontal {
+                background-color: #2d2d2d;
+                height: 12px;
+            }
+            QScrollBar::handle:horizontal {
+                background-color: #4d4d4d;
+                border-radius: 6px;
+                min-width: 20px;
+            }
+            QCheckBox {
+                color: #e0e0e0;
+            }
+            QCheckBox::indicator {
+                width: 16px;
+                height: 16px;
+            }
+        """)
+    
+    def _apply_light_theme(self):
+        """Apply light theme to the application"""
+        self.setStyleSheet("""
+            QMainWindow, QWidget {
+                background-color: #f5f5f5;
+                color: #333333;
+            }
+            QMenuBar {
+                background-color: #ffffff;
+                color: #333333;
+                border-bottom: 1px solid #e0e0e0;
+            }
+            QMenuBar::item:selected {
+                background-color: #e8e8e8;
+            }
+            QMenu {
+                background-color: #ffffff;
+                color: #333333;
+                border: 1px solid #d0d0d0;
+            }
+            QMenu::item:selected {
+                background-color: #e8e8e8;
+            }
+            QToolBar {
+                background-color: #ffffff;
+                border: none;
+                border-bottom: 1px solid #e0e0e0;
+                spacing: 5px;
+                padding: 5px;
+            }
+            QPushButton {
+                background-color: #ffffff;
+                color: #333333;
+                border: 1px solid #c0c0c0;
+                padding: 5px 10px;
+                border-radius: 3px;
+            }
+            QPushButton:hover {
+                background-color: #e8e8e8;
+            }
+            QPushButton:pressed {
+                background-color: #d0d0d0;
+            }
+            QDockWidget {
+                color: #333333;
+                titlebar-close-icon: none;
+            }
+            QDockWidget::title {
+                background-color: #f0f0f0;
+                padding: 5px;
+            }
+            QListWidget {
+                background-color: #ffffff;
+                color: #333333;
+                border: 1px solid #d0d0d0;
+            }
+            QListWidget::item {
+                padding: 5px;
+            }
+            QListWidget::item:selected {
+                background-color: #cce5ff;
+            }
+            QListWidget::item:hover {
+                background-color: #e8f4ff;
+            }
+            QLineEdit, QTextEdit, QSpinBox, QComboBox {
+                background-color: #ffffff;
+                color: #333333;
+                border: 1px solid #c0c0c0;
+                padding: 5px;
+            }
+            QLabel {
+                color: #333333;
+            }
+            QStatusBar {
+                background-color: #f0f0f0;
+                color: #666666;
+            }
+            QTableWidget {
+                background-color: #ffffff;
+                color: #333333;
+                gridline-color: #e0e0e0;
+            }
+            QTableWidget::item {
+                padding: 5px;
+            }
+            QHeaderView::section {
+                background-color: #f0f0f0;
+                color: #333333;
+                padding: 5px;
+                border: 1px solid #d0d0d0;
+            }
+            QScrollBar:vertical {
+                background-color: #f0f0f0;
+                width: 12px;
+            }
+            QScrollBar::handle:vertical {
+                background-color: #c0c0c0;
+                border-radius: 6px;
+                min-height: 20px;
+            }
+            QScrollBar:horizontal {
+                background-color: #f0f0f0;
+                height: 12px;
+            }
+            QScrollBar::handle:horizontal {
+                background-color: #c0c0c0;
+                border-radius: 6px;
+                min-width: 20px;
+            }
+            QCheckBox {
+                color: #333333;
+            }
+            QCheckBox::indicator {
+                width: 16px;
+                height: 16px;
+            }
+        """)
+    
+    def _toggle_theme(self):
+        """Toggle between light and dark theme"""
+        self._is_dark_theme = not self._is_dark_theme
+        
+        if self._is_dark_theme:
+            self._apply_dark_theme()
+            self.canvas.set_theme(dark=True)
+            self._update_brand_style(dark=True)
+            self.theme_btn.setText("🌙 浅色")
+            self.theme_action.setText("🌙 切换到浅色模式")
+            self.statusbar.showMessage("已切换到深色模式")
+        else:
+            self._apply_light_theme()
+            self.canvas.set_theme(dark=False)
+            self._update_brand_style(dark=False)
+            self.theme_btn.setText("☀️ 深色")
+            self.theme_action.setText("☀️ 切换到深色模式")
+            self.statusbar.showMessage("已切换到浅色模式")
+    
+    def _update_brand_style(self, dark: bool = True):
+        """Update IBCN Finance brand label style based on theme"""
+        if dark:
+            self.brand_name_label.setStyleSheet("""
+                QLabel {
+                    color: #ffffff;
+                    font-size: 16px;
+                    font-weight: bold;
+                    font-family: 'Segoe UI', Arial, sans-serif;
+                }
+            """)
+        else:
+            self.brand_name_label.setStyleSheet("""
+                QLabel {
+                    color: #333333;
+                    font-size: 16px;
+                    font-weight: bold;
+                    font-family: 'Segoe UI', Arial, sans-serif;
+                }
+            """)
+    
+    def _on_palette_item_double_clicked(self, item):
+        """Handle double-click on palette item"""
+        try:
+            if isinstance(item, NodeListItem):
+                # Save state before adding node
+                self._save_state()
+                # Add node to canvas at center
+                node = self.workflow.add_node(
+                    item.node_type, 
+                    (self.canvas.width() // 2, self.canvas.height() // 2)
+                )
+                self.canvas.update()
+                self.statusbar.showMessage(f"已添加节点: {node.node_name}")
+        except Exception as e:
+            QMessageBox.critical(self, "错误", f"添加节点失败: {e}")
+    
+    def _on_node_dropped(self, node_type: str, x: int, y: int):
+        """Handle node dropped from palette onto canvas"""
+        try:
+            # Save state before adding node
+            self._save_state()
+            # Add node at drop position
+            node = self.workflow.add_node(node_type, (x, y))
+            self.canvas.update()
+            self.statusbar.showMessage(f"已添加节点: {node.node_name}")
+        except Exception as e:
+            QMessageBox.critical(self, "错误", f"添加节点失败: {e}")
+    
+    def _on_node_selected(self, node_id: str):
+        """Handle node selection"""
+        if node_id and node_id in self.workflow.nodes:
+            node = self.workflow.nodes[node_id]
+            self.config_panel.set_node(node)
+            self.statusbar.showMessage(f"已选中: {node.node_name}")
+        else:
+            self.config_panel.clear()
+    
+    def _on_node_double_clicked(self, node_id: str):
+        """Handle node double-click"""
+        # Show config panel if hidden
+        self.config_dock.show()
+    
+    def _on_connection_created(self):
+        """Handle connection creation - save state for undo"""
+        self._save_state()
+        self.statusbar.showMessage("已创建连接")
+    
+    def _on_config_changed(self):
+        """Handle configuration change"""
+        self.canvas.update()
+    
+    def _new_workflow(self):
+        """Create a new workflow"""
+        if self._confirm_discard():
+            self.workflow = Workflow()
+            self.canvas.set_workflow(self.workflow)
+            self.config_panel.clear()
+            self.preview_panel.clear()
+            self.current_file = None
+            self.setWindowTitle("Excel 工作流工具 - 新工作流")
+            self.statusbar.showMessage("已创建新工作流")
+    
+    def _open_workflow(self):
+        """Open an existing workflow"""
+        if not self._confirm_discard():
+            return
+        
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, "打开工作流",
+            "", "工作流文件 (*.workflow.json);;所有文件 (*.*)"
+        )
+        
+        if file_path:
+            try:
+                self.workflow = Workflow.load(file_path)
+                self.canvas.set_workflow(self.workflow)
+                self.config_panel.clear()
+                self.preview_panel.clear()
+                self.current_file = file_path
+                self.setWindowTitle(f"IBCN Finance - Excel 工作流工具 - {Path(file_path).name}")
+                self.statusbar.showMessage(f"已打开: {file_path}")
+                self._add_to_recent_files(file_path)
+            except Exception as e:
+                QMessageBox.critical(self, "错误", f"打开工作流失败:\n{e}")
+    
+    def _save_workflow(self):
+        """Save the current workflow"""
+        if self.current_file:
+            try:
+                self.workflow.save(self.current_file)
+                self.statusbar.showMessage(f"已保存: {self.current_file}")
+            except Exception as e:
+                QMessageBox.critical(self, "错误", f"保存工作流失败:\n{e}")
+        else:
+            self._save_workflow_as()
+    
+    def _save_workflow_as(self):
+        """Save the workflow with a new name"""
+        file_path, _ = QFileDialog.getSaveFileName(
+            self, "保存工作流",
+            "workflow.workflow.json", "工作流文件 (*.workflow.json);;所有文件 (*.*)"
+        )
+        
+        if file_path:
+            try:
+                self.workflow.save(file_path)
+                self.current_file = file_path
+                self.setWindowTitle(f"IBCN Finance - Excel 工作流工具 - {Path(file_path).name}")
+                self.statusbar.showMessage(f"已保存: {file_path}")
+                self._add_to_recent_files(file_path)
+            except Exception as e:
+                QMessageBox.critical(self, "错误", f"保存工作流失败:\n{e}")
+    
+    def _reload_workflow(self):
+        """Reload the current workflow from file or reset canvas"""
+        if self.current_file and Path(self.current_file).exists():
+            # Reload from file
+            try:
+                self.workflow = Workflow.load(self.current_file)
+                self.canvas.set_workflow(self.workflow)
+                self.config_panel.clear()
+                self.preview_panel.clear()
+                # Clear undo/redo history
+                self._undo_stack.clear()
+                self._redo_stack.clear()
+                self._update_undo_redo_buttons()
+                self.statusbar.showMessage(f"已刷新: {self.current_file}")
+            except Exception as e:
+                QMessageBox.critical(self, "错误", f"刷新工作流失败:\n{e}")
+        else:
+            # Just refresh the canvas view
+            self.canvas.update()
+            self.canvas.fit_to_view()
+            self.config_panel.clear()
+            self.statusbar.showMessage("已刷新画布")
+    
+    def _delete_selected(self):
+        """Delete the selected node"""
+        if self.canvas.selected_node:
+            # Save state before deleting
+            self._save_state()
+            self.workflow.remove_node(self.canvas.selected_node)
+            self.canvas.selected_node = None
+            self.canvas.update()
+            self.config_panel.clear()
+            self.statusbar.showMessage("节点已删除")
+    
+    def _on_node_delete_requested(self, node_id: str):
+        """Handle node deletion from context menu"""
+        if node_id in self.workflow.nodes:
+            self._save_state()
+            self.workflow.remove_node(node_id)
+            self.canvas.selected_node = None
+            self.canvas.update()
+            self.config_panel.clear()
+            self.statusbar.showMessage("节点已删除")
+    
+    def _on_node_copy_requested(self, node_id: str):
+        """Handle node copy from context menu"""
+        if node_id in self.workflow.nodes:
+            self._save_state()
+            source_node = self.workflow.nodes[node_id]
+            # Create a new node of the same type
+            new_node = self.workflow.add_node(
+                source_node.node_type,
+                (source_node.x + 50, source_node.y + 50)
+            )
+            # Copy config
+            new_node.config = copy.deepcopy(source_node.config)
+            self.canvas.update()
+            self.statusbar.showMessage(f"已复制节点: {source_node.node_name}")
+    
+    def _execute_workflow(self):
+        """Execute the workflow"""
+        if not self.workflow.nodes:
+            QMessageBox.information(self, "提示", "工作流中没有节点可执行。")
+            return
+        
+        self.statusbar.showMessage("正在执行工作流...")
+        
+        # Set all nodes to pending
+        for node_id in self.workflow.nodes:
+            self.canvas.set_node_status(node_id, 'pending')
+        
+        # Start animation
+        self.canvas.start_animation()
+        QApplication.processEvents()
+        
+        try:
+            def progress(current, total, node_name, node_id=None):
+                self.statusbar.showMessage(f"正在执行: {node_name} ({current}/{total})")
+                if node_id:
+                    # Set previous running nodes to success before setting new one to running
+                    for nid in self.workflow.nodes:
+                        if self.canvas.node_status.get(nid) == 'running':
+                            self.canvas.set_node_status(nid, 'success')
+                    self.canvas.set_node_status(node_id, 'running')
+                QApplication.processEvents()
+            
+            results = self.workflow.execute(progress)
+            
+            # Update node status based on results
+            for node_id, result in results.items():
+                if result["success"]:
+                    self.canvas.set_node_status(node_id, 'success')
+                else:
+                    self.canvas.set_node_status(node_id, 'error')
+            
+            # Show results in preview panel
+            last_output = None
+            for node_id, result in results.items():
+                if result["success"] and result.get("output"):
+                    for port_name, data in result["output"].items():
+                        last_output = data
+            
+            if last_output is not None:
+                self.preview_panel.set_data(last_output)
+            
+            # Stop animation
+            self.canvas.stop_animation()
+            
+            self.statusbar.showMessage("工作流执行成功！")
+            QMessageBox.information(self, "成功", "工作流执行成功！")
+            
+        except Exception as e:
+            # Stop animation and clear status on error
+            self.canvas.stop_animation()
+            self.canvas.clear_node_status()
+            self.statusbar.showMessage(f"执行失败: {e}")
+            QMessageBox.critical(self, "执行错误", str(e))
+    
+    def _confirm_discard(self) -> bool:
+        """Confirm discarding unsaved changes"""
+        # For simplicity, always return True
+        # In a real app, you'd track changes and prompt
+        return True
+    
+    def _setup_branding(self):
+        """Set up IBCN Finance branding elements"""
+        # Set window icon if logo exists
+        logo_path = Path(__file__).parent.parent.parent / "assets" / "logo.png"
+        if logo_path.exists():
+            self.setWindowIcon(QIcon(str(logo_path)))
+    
+    def _save_state(self):
+        """Save current workflow state for undo"""
+        import copy
+        state = {
+            'nodes': copy.deepcopy([(n.node_id, n.node_type, n.node_name, n.position[0], n.position[1], copy.deepcopy(n.config)) 
+                                    for n in self.workflow.nodes.values()]),
+            'connections': copy.deepcopy(list(self.workflow.connections))
+        }
+        self._undo_stack.append(state)
+        if len(self._undo_stack) > self._max_history:
+            self._undo_stack.pop(0)
+        self._redo_stack.clear()
+        self._update_undo_redo_buttons()
+    
+    def _undo(self):
+        """Undo the last action"""
+        if not self._undo_stack:
+            return
+        
+        import copy
+        # Save current state to redo
+        current_state = {
+            'nodes': copy.deepcopy([(n.node_id, n.node_type, n.node_name, n.position[0], n.position[1], copy.deepcopy(n.config)) 
+                                    for n in self.workflow.nodes.values()]),
+            'connections': copy.deepcopy(list(self.workflow.connections))
+        }
+        self._redo_stack.append(current_state)
+        
+        # Restore previous state
+        state = self._undo_stack.pop()
+        self._restore_state(state)
+        self._update_undo_redo_buttons()
+        self.statusbar.showMessage("已撤销")
+    
+    def _redo(self):
+        """Redo the last undone action"""
+        if not self._redo_stack:
+            return
+        
+        import copy
+        # Save current state to undo
+        current_state = {
+            'nodes': copy.deepcopy([(n.node_id, n.node_type, n.node_name, n.position[0], n.position[1], copy.deepcopy(n.config)) 
+                                    for n in self.workflow.nodes.values()]),
+            'connections': copy.deepcopy(list(self.workflow.connections))
+        }
+        self._undo_stack.append(current_state)
+        
+        # Restore redo state
+        state = self._redo_stack.pop()
+        self._restore_state(state)
+        self._update_undo_redo_buttons()
+        self.statusbar.showMessage("已重做")
+    
+    def _restore_state(self, state: dict):
+        """Restore workflow to a saved state"""
+        # Clear current workflow
+        self.workflow.nodes.clear()
+        self.workflow.connections.clear()
+        
+        # Restore nodes
+        for node_id, node_type, name, x, y, config in state['nodes']:
+            node_class = NodeRegistry.get_node_class(node_type)
+            if node_class:
+                node = node_class(node_id)
+                node.position = (x, y)
+                node.config = config
+                self.workflow.nodes[node_id] = node
+        
+        # Restore connections
+        for conn in state['connections']:
+            self.workflow.connections.append(conn)
+        
+        # Update canvas
+        self.canvas.update()
+        self.config_panel.clear()
+    
+    def _update_undo_redo_buttons(self):
+        """Update undo/redo button states"""
+        self.undo_action.setEnabled(len(self._undo_stack) > 0)
+        self.redo_action.setEnabled(len(self._redo_stack) > 0)
+        self.undo_btn.setEnabled(len(self._undo_stack) > 0)
+        self.redo_btn.setEnabled(len(self._redo_stack) > 0)
+    
+    def _update_recent_menu(self):
+        """Update the recent files menu"""
+        self.recent_menu.clear()
+        
+        settings = QSettings("IBCNFinance", "ExcelWorkflowTool")
+        recent_files = settings.value("recent_files", [])
+        
+        if not recent_files:
+            no_recent = QAction("(无最近文件)", self)
+            no_recent.setEnabled(False)
+            self.recent_menu.addAction(no_recent)
+            return
+        
+        for file_path in recent_files[:10]:  # Show max 10 recent files
+            if Path(file_path).exists():
+                action = QAction(Path(file_path).name, self)
+                action.setToolTip(file_path)
+                action.setData(file_path)
+                action.triggered.connect(lambda checked, fp=file_path: self._open_recent_file(fp))
+                self.recent_menu.addAction(action)
+        
+        self.recent_menu.addSeparator()
+        clear_action = QAction("清除最近文件列表", self)
+        clear_action.triggered.connect(self._clear_recent_files)
+        self.recent_menu.addAction(clear_action)
+    
+    def _add_to_recent_files(self, file_path: str):
+        """Add a file to the recent files list"""
+        settings = QSettings("IBCNFinance", "ExcelWorkflowTool")
+        recent_files = settings.value("recent_files", [])
+        
+        # Remove if already exists
+        if file_path in recent_files:
+            recent_files.remove(file_path)
+        
+        # Add to front
+        recent_files.insert(0, file_path)
+        
+        # Keep only last 10
+        recent_files = recent_files[:10]
+        
+        settings.setValue("recent_files", recent_files)
+        self._update_recent_menu()
+    
+    def _open_recent_file(self, file_path: str):
+        """Open a file from the recent files list"""
+        if not Path(file_path).exists():
+            QMessageBox.warning(self, "文件不存在", f"文件不存在:\n{file_path}")
+            return
+        
+        if self._confirm_discard():
+            try:
+                self.workflow.load(file_path)
+                self.current_file = file_path
+                self.canvas.set_workflow(self.workflow)
+                self.config_panel.clear()
+                self.setWindowTitle(f"IBCN Finance - Excel 工作流工具 - {Path(file_path).name}")
+                self.statusbar.showMessage(f"已打开: {file_path}")
+                self._add_to_recent_files(file_path)
+            except Exception as e:
+                QMessageBox.critical(self, "错误", f"打开工作流失败:\n{e}")
+    
+    def _clear_recent_files(self):
+        """Clear the recent files list"""
+        settings = QSettings("IBCNFinance", "ExcelWorkflowTool")
+        settings.setValue("recent_files", [])
+        self._update_recent_menu()
+        self.statusbar.showMessage("已清除最近文件列表")
+    
+    def _show_shortcuts(self):
+        """Show keyboard shortcuts dialog"""
+        shortcuts = """
+        <h3>快捷键列表</h3>
+        <table style="border-collapse: collapse; width: 100%;">
+        <tr><td style="padding: 5px;"><b>Ctrl+N</b></td><td style="padding: 5px;">新建工作流</td></tr>
+        <tr><td style="padding: 5px;"><b>Ctrl+O</b></td><td style="padding: 5px;">打开工作流</td></tr>
+        <tr><td style="padding: 5px;"><b>Ctrl+S</b></td><td style="padding: 5px;">保存工作流</td></tr>
+        <tr><td style="padding: 5px;"><b>Ctrl+Shift+S</b></td><td style="padding: 5px;">另存为</td></tr>
+        <tr><td style="padding: 5px;"><b>Ctrl+R</b></td><td style="padding: 5px;">刷新工作流</td></tr>
+        <tr><td style="padding: 5px;"><b>Ctrl+Z</b></td><td style="padding: 5px;">撤销</td></tr>
+        <tr><td style="padding: 5px;"><b>Ctrl+Y</b></td><td style="padding: 5px;">重做</td></tr>
+        <tr><td style="padding: 5px;"><b>Delete</b></td><td style="padding: 5px;">删除选中节点</td></tr>
+        <tr><td style="padding: 5px;"><b>Ctrl+T</b></td><td style="padding: 5px;">切换深色/浅色主题</td></tr>
+        <tr><td style="padding: 5px;"><b>F6</b></td><td style="padding: 5px;">执行工作流</td></tr>
+        <tr><td style="padding: 5px;"><b>Ctrl+/</b></td><td style="padding: 5px;">显示快捷键列表</td></tr>
+        <tr><td style="padding: 5px;"><b>Ctrl+Shift+R</b></td><td style="padding: 5px;">重启应用</td></tr>
+        </table>
+        <br>
+        <h4>画布操作</h4>
+        <table style="border-collapse: collapse; width: 100%;">
+        <tr><td style="padding: 5px;"><b>鼠标滚轮</b></td><td style="padding: 5px;">缩放画布</td></tr>
+        <tr><td style="padding: 5px;"><b>中键拖动</b></td><td style="padding: 5px;">平移画布</td></tr>
+        <tr><td style="padding: 5px;"><b>双击节点</b></td><td style="padding: 5px;">打开节点配置</td></tr>
+        <tr><td style="padding: 5px;"><b>拖动端口</b></td><td style="padding: 5px;">创建连接</td></tr>
+        </table>
+        """
+        QMessageBox.information(self, "快捷键列表", shortcuts)
+    
+    def _show_about(self):
+        """Show about dialog"""
+        dialog = AboutDialog(self)
+        dialog.exec()
+    
+    def _restart_app(self):
+        """Restart the application"""
+        reply = QMessageBox.question(
+            self, 
+            "确认重启",
+            "确定要重启应用程序吗？\n未保存的更改将会丢失。",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No
+        )
+        
+        if reply == QMessageBox.StandardButton.Yes:
+            import sys
+            import os
+            
+            # Get the path to the main script
+            python = sys.executable
+            script = os.path.abspath(sys.argv[0])
+            
+            # Start new instance
+            os.execl(python, python, script, *sys.argv[1:])
+    
+    def closeEvent(self, event):
+        """Handle window close event - auto-save workflow and settings"""
+        # Save all application settings first
+        self._save_settings()
+        
+        # Check if there are any nodes in the workflow
+        if self.workflow.nodes:
+            # Auto-save the workflow
+            try:
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                if self.current_file:
+                    # Use current filename as base
+                    base_name = Path(self.current_file).stem
+                    auto_save_path = self._auto_save_dir / f"{base_name}_autosave_{timestamp}.workflow.json"
+                else:
+                    auto_save_path = self._auto_save_dir / f"untitled_autosave_{timestamp}.workflow.json"
+                
+                self.workflow.save(str(auto_save_path))
+                
+                # Keep only the last 10 auto-save files
+                self._cleanup_old_autosaves()
+                
+                self.statusbar.showMessage(f"自动保存: {auto_save_path}")
+            except Exception as e:
+                # If auto-save fails, ask user if they want to continue closing
+                reply = QMessageBox.warning(
+                    self,
+                    "自动保存失败",
+                    f"无法自动保存工作流:\n{e}\n\n是否仍然关闭应用程序？",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.No
+                )
+                if reply == QMessageBox.StandardButton.No:
+                    event.ignore()
+                    return
+        
+        event.accept()
+    
+    def _save_settings(self):
+        """Save all application settings"""
+        # Window geometry
+        self._settings.setValue("geometry", self.saveGeometry())
+        self._settings.setValue("windowState", self.saveState())
+        
+        # Theme
+        self._settings.setValue("theme/isDark", self._is_dark_theme)
+        
+        # Current file
+        if self.current_file:
+            self._settings.setValue("lastFile", self.current_file)
+        
+        # Panel visibility
+        self._settings.setValue("panels/nodePalette", self.node_palette.isVisible())
+        self._settings.setValue("panels/configPanel", self.config_dock.isVisible())
+        self._settings.setValue("panels/previewPanel", self.preview_dock.isVisible())
+        
+        # Canvas zoom level
+        self._settings.setValue("canvas/scale", self.canvas.scale)
+        
+        # Sync settings to disk
+        self._settings.sync()
+    
+    def _restore_settings(self):
+        """Restore saved application settings"""
+        # Window geometry
+        geometry = self._settings.value("geometry")
+        if geometry:
+            self.restoreGeometry(geometry)
+        
+        windowState = self._settings.value("windowState")
+        if windowState:
+            self.restoreState(windowState)
+        
+        # Theme
+        saved_theme = self._settings.value("theme/isDark")
+        if saved_theme is not None:
+            self._is_dark_theme = saved_theme == True or saved_theme == "true"
+        
+        # Panel visibility
+        palette_visible = self._settings.value("panels/nodePalette")
+        if palette_visible is not None:
+            visible = palette_visible == True or palette_visible == "true"
+            self.node_palette.setVisible(visible)
+        
+        config_visible = self._settings.value("panels/configPanel")
+        if config_visible is not None:
+            visible = config_visible == True or config_visible == "true"
+            self.config_dock.setVisible(visible)
+        
+        preview_visible = self._settings.value("panels/previewPanel")
+        if preview_visible is not None:
+            visible = preview_visible == True or preview_visible == "true"
+            self.preview_dock.setVisible(visible)
+        
+        # Canvas scale
+        saved_scale = self._settings.value("canvas/scale")
+        if saved_scale is not None:
+            try:
+                self.canvas.scale = float(saved_scale)
+            except (ValueError, TypeError):
+                pass
+        
+        # Last opened file (optional: auto-load)
+        last_file = self._settings.value("lastFile")
+        if last_file and Path(last_file).exists():
+            self.current_file = last_file
+            # Optionally load the file automatically
+            # self._load_workflow_file(last_file)
+    
+    def _cleanup_old_autosaves(self):
+        """Keep only the last 10 auto-save files"""
+        try:
+            autosave_files = sorted(
+                self._auto_save_dir.glob("*_autosave_*.workflow.json"),
+                key=lambda f: f.stat().st_mtime,
+                reverse=True
+            )
+            # Remove files beyond the 10 most recent
+            for old_file in autosave_files[10:]:
+                old_file.unlink()
+        except Exception:
+            pass  # Ignore cleanup errors
