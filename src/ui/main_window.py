@@ -201,8 +201,8 @@ class MainWindow(QMainWindow):
         self._redo_stack: List[Dict[str, Any]] = []
         self._max_history = 50  # Maximum undo steps
         
-        # Theme state (True = dark, False = light)
-        self._is_dark_theme = True
+        # Theme state (True = dark, False = light) - Default to light theme
+        self._is_dark_theme = False
         
         # Auto-save directory
         self._auto_save_dir = Path(__file__).parent.parent.parent / "autosave"
@@ -232,8 +232,16 @@ class MainWindow(QMainWindow):
         # Apply theme based on restored setting
         if self._is_dark_theme:
             self._apply_dark_theme()
+            self.canvas.set_theme(dark=True)
+            self._update_brand_style(dark=True)
+            self.theme_btn.setText("🌙 浅色")
+            self.theme_action.setText("🌙 切换到浅色模式")
         else:
             self._apply_light_theme()
+            self.canvas.set_theme(dark=False)
+            self._update_brand_style(dark=False)
+            self.theme_btn.setText("☀️ 深色")
+            self.theme_action.setText("☀️ 切换到深色模式")
     
     def _setup_ui(self):
         """Set up the main UI layout"""
@@ -317,6 +325,32 @@ class MainWindow(QMainWindow):
         self._update_recent_menu()
         file_menu.addMenu(self.recent_menu)
         
+        # Templates submenu
+        self.templates_menu = QMenu("工作流模板(&T)", self)
+        self._setup_templates_menu()
+        file_menu.addMenu(self.templates_menu)
+        
+        file_menu.addSeparator()
+        
+        # Export/Import submenu
+        export_menu = QMenu("导出/导入(&E)", self)
+        
+        export_workflow_action = QAction("📤 导出工作流...", self)
+        export_workflow_action.triggered.connect(self._export_workflow)
+        export_menu.addAction(export_workflow_action)
+        
+        import_workflow_action = QAction("📥 导入工作流...", self)
+        import_workflow_action.triggered.connect(self._import_workflow)
+        export_menu.addAction(import_workflow_action)
+        
+        export_menu.addSeparator()
+        
+        export_image_action = QAction("🖼️ 导出为图片...", self)
+        export_image_action.triggered.connect(self._export_as_image)
+        export_menu.addAction(export_image_action)
+        
+        file_menu.addMenu(export_menu)
+        
         file_menu.addSeparator()
         
         # Restart app
@@ -369,10 +403,27 @@ class MainWindow(QMainWindow):
         
         view_menu.addSeparator()
         
+        # Minimap toggle
+        self.minimap_action = QAction("🗺️ 小地图", self)
+        self.minimap_action.setCheckable(True)
+        self.minimap_action.setChecked(True)
+        self.minimap_action.setShortcut("Ctrl+M")
+        self.minimap_action.triggered.connect(self._toggle_minimap)
+        view_menu.addAction(self.minimap_action)
+        
+        # Fit to view
+        fit_action = QAction("📐 适应窗口", self)
+        fit_action.setShortcut("Ctrl+0")
+        fit_action.triggered.connect(lambda: self.canvas.fit_to_view())
+        view_menu.addAction(fit_action)
+        
+        view_menu.addSeparator()
+        
         # Theme toggle
         self.theme_action = QAction("🌙 切换到浅色模式", self)
         self.theme_action.setShortcut("Ctrl+T")
         self.theme_action.triggered.connect(self._toggle_theme)
+        view_menu.addAction(self.theme_action)
         view_menu.addAction(self.theme_action)
         
         # Help menu
@@ -774,6 +825,11 @@ class MainWindow(QMainWindow):
                     font-family: 'Segoe UI', Arial, sans-serif;
                 }
             """)
+    
+    def _toggle_minimap(self):
+        """Toggle minimap visibility"""
+        self.canvas.toggle_minimap()
+        self.statusbar.showMessage("小地图: " + ("显示" if self.canvas._show_minimap else "隐藏"))
     
     def _on_palette_item_double_clicked(self, item):
         """Handle double-click on palette item"""
@@ -1300,10 +1356,12 @@ class MainWindow(QMainWindow):
         if windowState:
             self.restoreState(windowState)
         
-        # Theme
+        # Theme - Force light theme as default, ignore previously saved dark theme
         saved_theme = self._settings.value("theme/isDark")
-        if saved_theme is not None:
-            self._is_dark_theme = saved_theme == True or saved_theme == "true"
+        # Reset to light theme by default
+        self._is_dark_theme = False
+        # Clear the old setting
+        self._settings.setValue("theme/isDark", False)
         
         # Panel visibility
         palette_visible = self._settings.value("panels/nodePalette")
@@ -1349,3 +1407,243 @@ class MainWindow(QMainWindow):
                 old_file.unlink()
         except Exception:
             pass  # Ignore cleanup errors
+    
+    def _setup_templates_menu(self):
+        """Set up the templates menu with predefined workflow templates"""
+        # Add "Save as Template" option
+        save_template_action = QAction("💾 保存为模板...", self)
+        save_template_action.triggered.connect(self._save_as_template)
+        self.templates_menu.addAction(save_template_action)
+        
+        self.templates_menu.addSeparator()
+        
+        # Predefined templates
+        templates = [
+            ("📊 数据清洗模板", "data_cleaning", "读取Excel → 去重 → 填充空值 → 写入Excel"),
+            ("🔗 数据合并模板", "data_merge", "读取多个Excel → 合并数据 → 写入Excel"),
+            ("📈 数据分析模板", "data_analysis", "读取Excel → 分组汇总 → 数据透视表 → 写入Excel"),
+            ("📁 批量处理模板", "batch_process", "批量读取文件夹 → 数据转换 → 批量写入"),
+            ("✅ 数据验证模板", "data_validation", "读取Excel → 数据验证 → 分离有效/无效数据"),
+        ]
+        
+        for name, template_id, description in templates:
+            action = QAction(name, self)
+            action.setStatusTip(description)
+            action.triggered.connect(lambda checked, tid=template_id: self._load_template(tid))
+            self.templates_menu.addAction(action)
+        
+        self.templates_menu.addSeparator()
+        
+        # User templates submenu
+        self.user_templates_menu = QMenu("📂 我的模板", self)
+        self._update_user_templates_menu()
+        self.templates_menu.addMenu(self.user_templates_menu)
+    
+    def _update_user_templates_menu(self):
+        """Update user templates menu"""
+        self.user_templates_menu.clear()
+        
+        templates_dir = Path(__file__).parent.parent.parent / "templates"
+        templates_dir.mkdir(exist_ok=True)
+        
+        template_files = list(templates_dir.glob("*.template.json"))
+        
+        if template_files:
+            for template_file in sorted(template_files):
+                name = template_file.stem.replace(".template", "")
+                action = QAction(f"📄 {name}", self)
+                action.triggered.connect(lambda checked, f=template_file: self._load_template_file(f))
+                self.user_templates_menu.addAction(action)
+        else:
+            empty_action = QAction("(无保存的模板)", self)
+            empty_action.setEnabled(False)
+            self.user_templates_menu.addAction(empty_action)
+    
+    def _save_as_template(self):
+        """Save current workflow as a template"""
+        from PyQt6.QtWidgets import QInputDialog
+        
+        name, ok = QInputDialog.getText(self, "保存模板", "模板名称:")
+        if ok and name:
+            templates_dir = Path(__file__).parent.parent.parent / "templates"
+            templates_dir.mkdir(exist_ok=True)
+            
+            template_file = templates_dir / f"{name}.template.json"
+            
+            try:
+                workflow_data = self.workflow.to_dict()
+                workflow_data['template_name'] = name
+                workflow_data['template_description'] = f"用户创建的模板: {name}"
+                
+                with open(template_file, 'w', encoding='utf-8') as f:
+                    json.dump(workflow_data, f, ensure_ascii=False, indent=2)
+                
+                self._update_user_templates_menu()
+                self.statusbar.showMessage(f"模板已保存: {name}")
+                QMessageBox.information(self, "成功", f"模板 '{name}' 已保存!")
+            except Exception as e:
+                QMessageBox.critical(self, "错误", f"保存模板失败: {e}")
+    
+    def _load_template(self, template_id: str):
+        """Load a predefined template"""
+        self._save_state()
+        
+        # Clear current workflow
+        self.workflow.nodes.clear()
+        self.workflow.connections.clear()
+        
+        # Create template based on ID
+        if template_id == "data_cleaning":
+            # Data cleaning template
+            read_node = self.workflow.add_node("read_excel", (100, 200))
+            dedup_node = self.workflow.add_node("remove_duplicates", (350, 200))
+            fill_node = self.workflow.add_node("fill_na", (600, 200))
+            write_node = self.workflow.add_node("write_excel", (850, 200))
+            
+            self.workflow.connect(read_node.node_id, "data", dedup_node.node_id, "data")
+            self.workflow.connect(dedup_node.node_id, "data", fill_node.node_id, "data")
+            self.workflow.connect(fill_node.node_id, "data", write_node.node_id, "data")
+            
+        elif template_id == "data_merge":
+            # Data merge template
+            read1 = self.workflow.add_node("read_excel", (100, 100))
+            read2 = self.workflow.add_node("read_excel", (100, 300))
+            merge_node = self.workflow.add_node("merge_data", (400, 200))
+            write_node = self.workflow.add_node("write_excel", (700, 200))
+            
+            self.workflow.connect(read1.node_id, "data", merge_node.node_id, "left")
+            self.workflow.connect(read2.node_id, "data", merge_node.node_id, "right")
+            self.workflow.connect(merge_node.node_id, "data", write_node.node_id, "data")
+            
+        elif template_id == "data_analysis":
+            # Data analysis template
+            read_node = self.workflow.add_node("read_excel", (100, 200))
+            group_node = self.workflow.add_node("group_by", (350, 200))
+            pivot_node = self.workflow.add_node("pivot_table", (600, 200))
+            write_node = self.workflow.add_node("write_excel", (850, 200))
+            
+            self.workflow.connect(read_node.node_id, "data", group_node.node_id, "data")
+            self.workflow.connect(group_node.node_id, "data", pivot_node.node_id, "data")
+            self.workflow.connect(pivot_node.node_id, "data", write_node.node_id, "data")
+            
+        elif template_id == "batch_process":
+            # Batch processing template
+            batch_read = self.workflow.add_node("batch_read_excel", (100, 200))
+            filter_node = self.workflow.add_node("filter_rows", (400, 200))
+            batch_write = self.workflow.add_node("batch_write_excel", (700, 200))
+            
+            self.workflow.connect(batch_read.node_id, "data", filter_node.node_id, "data")
+            self.workflow.connect(filter_node.node_id, "data", batch_write.node_id, "data")
+            
+        elif template_id == "data_validation":
+            # Data validation template
+            read_node = self.workflow.add_node("read_excel", (100, 200))
+            validate_node = self.workflow.add_node("data_validation", (400, 200))
+            write_valid = self.workflow.add_node("write_excel", (700, 100))
+            write_invalid = self.workflow.add_node("write_excel", (700, 300))
+            
+            self.workflow.connect(read_node.node_id, "data", validate_node.node_id, "data")
+            self.workflow.connect(validate_node.node_id, "valid_data", write_valid.node_id, "data")
+            self.workflow.connect(validate_node.node_id, "invalid_data", write_invalid.node_id, "data")
+        
+        self.canvas.update()
+        self.canvas.fit_to_view()
+        self.statusbar.showMessage(f"已加载模板: {template_id}")
+    
+    def _load_template_file(self, template_file: Path):
+        """Load a user-saved template file"""
+        try:
+            self._save_state()
+            
+            with open(template_file, 'r', encoding='utf-8') as f:
+                template_data = json.load(f)
+            
+            self.workflow.from_dict(template_data)
+            self.canvas.update()
+            self.canvas.fit_to_view()
+            
+            template_name = template_data.get('template_name', template_file.stem)
+            self.statusbar.showMessage(f"已加载模板: {template_name}")
+        except Exception as e:
+            QMessageBox.critical(self, "错误", f"加载模板失败: {e}")
+    
+    def _export_workflow(self):
+        """Export workflow to a standalone file"""
+        file_path, _ = QFileDialog.getSaveFileName(
+            self, "导出工作流", "",
+            "工作流文件 (*.workflow.json);;所有文件 (*.*)"
+        )
+        
+        if file_path:
+            try:
+                if not file_path.endswith('.workflow.json'):
+                    file_path += '.workflow.json'
+                
+                workflow_data = self.workflow.to_dict()
+                workflow_data['export_info'] = {
+                    'app_version': '1.0.0',
+                    'export_date': datetime.now().isoformat(),
+                    'node_count': len(self.workflow.nodes),
+                    'connection_count': len(self.workflow.connections)
+                }
+                
+                with open(file_path, 'w', encoding='utf-8') as f:
+                    json.dump(workflow_data, f, ensure_ascii=False, indent=2)
+                
+                self.statusbar.showMessage(f"工作流已导出: {file_path}")
+                QMessageBox.information(self, "成功", f"工作流已成功导出到:\n{file_path}")
+            except Exception as e:
+                QMessageBox.critical(self, "错误", f"导出失败: {e}")
+    
+    def _import_workflow(self):
+        """Import workflow from a file"""
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, "导入工作流", "",
+            "工作流文件 (*.workflow.json *.json);;所有文件 (*.*)"
+        )
+        
+        if file_path:
+            try:
+                self._save_state()
+                
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    workflow_data = json.load(f)
+                
+                self.workflow.from_dict(workflow_data)
+                self.canvas.update()
+                self.canvas.fit_to_view()
+                
+                # Show import info if available
+                export_info = workflow_data.get('export_info', {})
+                node_count = export_info.get('node_count', len(self.workflow.nodes))
+                
+                self.statusbar.showMessage(f"已导入工作流: {node_count} 个节点")
+                QMessageBox.information(self, "成功", f"成功导入工作流!\n节点数: {node_count}")
+            except Exception as e:
+                QMessageBox.critical(self, "错误", f"导入失败: {e}")
+    
+    def _export_as_image(self):
+        """Export canvas as image"""
+        file_path, _ = QFileDialog.getSaveFileName(
+            self, "导出为图片", "workflow",
+            "PNG图片 (*.png);;JPEG图片 (*.jpg);;所有文件 (*.*)"
+        )
+        
+        if file_path:
+            try:
+                # Ensure file has extension
+                if not any(file_path.endswith(ext) for ext in ['.png', '.jpg', '.jpeg']):
+                    file_path += '.png'
+                
+                # Create a pixmap of the canvas
+                pixmap = QPixmap(self.canvas.size())
+                self.canvas.render(pixmap)
+                
+                # Save the pixmap
+                pixmap.save(file_path)
+                
+                self.statusbar.showMessage(f"图片已保存: {file_path}")
+                QMessageBox.information(self, "成功", f"工作流图片已保存到:\n{file_path}")
+            except Exception as e:
+                QMessageBox.critical(self, "错误", f"导出图片失败: {e}")
+

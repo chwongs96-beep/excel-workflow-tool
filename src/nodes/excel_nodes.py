@@ -3873,3 +3873,1632 @@ class TextProcessNode(BaseNode):
         
         return {"data": df}
 
+
+@register_node
+class PivotTableNode(BaseNode):
+    """Node to create a pivot table from Excel data"""
+    
+    node_type = "pivot_table"
+    node_name = "数据透视表"
+    node_category = "汇总"
+    node_description = "从数据创建数据透视表，进行多维汇总分析"
+    node_color = "#8b5cf6"  # Purple
+    
+    def _setup_ports(self):
+        self.add_input("data")
+        self.add_output("data")
+    
+    def get_config_ui_schema(self) -> List[Dict[str, Any]]:
+        return [
+            {
+                "key": "index_columns",
+                "label": "行标签 (逗号分隔)",
+                "type": "text",
+                "required": True,
+                "placeholder": "例如: 部门, 年份"
+            },
+            {
+                "key": "column_columns",
+                "label": "列标签 (逗号分隔，可选)",
+                "type": "text",
+                "default": "",
+                "placeholder": "例如: 季度, 月份"
+            },
+            {
+                "key": "value_column",
+                "label": "值列",
+                "type": "text",
+                "required": True,
+                "placeholder": "例如: 销售额"
+            },
+            {
+                "key": "agg_function",
+                "label": "汇总函数",
+                "type": "select",
+                "options": [
+                    {"value": "sum", "label": "求和"},
+                    {"value": "mean", "label": "平均值"},
+                    {"value": "count", "label": "计数"},
+                    {"value": "min", "label": "最小值"},
+                    {"value": "max", "label": "最大值"},
+                    {"value": "median", "label": "中位数"},
+                    {"value": "std", "label": "标准差"},
+                    {"value": "var", "label": "方差"}
+                ],
+                "default": "sum"
+            },
+            {
+                "key": "fill_value",
+                "label": "空值填充",
+                "type": "text",
+                "default": "0",
+                "placeholder": "填充透视表中的空值"
+            },
+            {
+                "key": "margins",
+                "label": "显示合计行/列",
+                "type": "checkbox",
+                "default": False
+            },
+            {
+                "key": "margins_name",
+                "label": "合计名称",
+                "type": "text",
+                "default": "合计"
+            },
+            {
+                "key": "flatten_columns",
+                "label": "扁平化列名",
+                "type": "checkbox",
+                "default": True,
+                "description": "将多级列名转换为单级列名"
+            }
+        ]
+    
+    def validate(self) -> tuple[bool, str]:
+        if not self.get_param("index_columns"):
+            return False, "行标签列是必需的"
+        if not self.get_param("value_column"):
+            return False, "值列是必需的"
+        return True, ""
+    
+    def execute(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
+        df = input_data.get("data")
+        if df is None:
+            raise ValueError("No input data received")
+        
+        # Parse parameters
+        index_cols = [c.strip() for c in self.get_param("index_columns", "").split(",") if c.strip()]
+        col_cols_str = self.get_param("column_columns", "")
+        col_cols = [c.strip() for c in col_cols_str.split(",") if c.strip()] if col_cols_str else None
+        value_col = self.get_param("value_column", "").strip()
+        agg_func = self.get_param("agg_function", "sum")
+        fill_value = self.get_param("fill_value", "0")
+        margins = self.get_param("margins", False)
+        margins_name = self.get_param("margins_name", "合计")
+        flatten = self.get_param("flatten_columns", True)
+        
+        # Validate columns exist
+        for col in index_cols:
+            if col not in df.columns:
+                raise ValueError(f"行标签列 '{col}' 不存在")
+        
+        if col_cols:
+            for col in col_cols:
+                if col not in df.columns:
+                    raise ValueError(f"列标签列 '{col}' 不存在")
+        
+        if value_col not in df.columns:
+            raise ValueError(f"值列 '{value_col}' 不存在")
+        
+        # Try to parse fill_value as number
+        try:
+            if '.' in fill_value:
+                fill_val = float(fill_value)
+            else:
+                fill_val = int(fill_value)
+        except ValueError:
+            fill_val = fill_value  # Keep as string
+        
+        # Create pivot table
+        import pandas as pd
+        
+        pivot_df = pd.pivot_table(
+            df,
+            index=index_cols,
+            columns=col_cols,
+            values=value_col,
+            aggfunc=agg_func,
+            fill_value=fill_val,
+            margins=margins,
+            margins_name=margins_name
+        )
+        
+        # Reset index to make it a regular DataFrame
+        pivot_df = pivot_df.reset_index()
+        
+        # Flatten multi-level columns if requested
+        if flatten and isinstance(pivot_df.columns, pd.MultiIndex):
+            pivot_df.columns = ['_'.join(str(c) for c in col if str(c) != '').strip('_') 
+                               if isinstance(col, tuple) else col 
+                               for col in pivot_df.columns]
+        elif hasattr(pivot_df.columns, 'to_flat_index'):
+            # Handle case where columns might be MultiIndex
+            if isinstance(pivot_df.columns, pd.MultiIndex) and flatten:
+                pivot_df.columns = ['_'.join(map(str, col)).strip('_') for col in pivot_df.columns]
+        
+        return {"data": pivot_df}
+
+
+@register_node
+class UnpivotNode(BaseNode):
+    """Node to unpivot (melt) data - convert wide format to long format"""
+    
+    node_type = "unpivot"
+    node_name = "逆透视表"
+    node_category = "汇总"
+    node_description = "将宽表转换为长表格式（逆透视/融合）"
+    node_color = "#a855f7"  # Light Purple
+    
+    def _setup_ports(self):
+        self.add_input("data")
+        self.add_output("data")
+    
+    def get_config_ui_schema(self) -> List[Dict[str, Any]]:
+        return [
+            {
+                "key": "id_columns",
+                "label": "标识列 (逗号分隔)",
+                "type": "text",
+                "required": True,
+                "placeholder": "保持不变的列，例如: 产品名称, 地区"
+            },
+            {
+                "key": "value_columns",
+                "label": "值列 (逗号分隔，可选)",
+                "type": "text",
+                "default": "",
+                "placeholder": "要逆透视的列，留空表示所有其他列"
+            },
+            {
+                "key": "var_name",
+                "label": "变量列名",
+                "type": "text",
+                "default": "变量",
+                "placeholder": "存储原列名的新列名称"
+            },
+            {
+                "key": "value_name",
+                "label": "值列名",
+                "type": "text",
+                "default": "值",
+                "placeholder": "存储值的新列名称"
+            }
+        ]
+    
+    def validate(self) -> tuple[bool, str]:
+        if not self.get_param("id_columns"):
+            return False, "标识列是必需的"
+        return True, ""
+    
+    def execute(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
+        df = input_data.get("data")
+        if df is None:
+            raise ValueError("No input data received")
+        
+        import pandas as pd
+        
+        # Parse parameters
+        id_cols = [c.strip() for c in self.get_param("id_columns", "").split(",") if c.strip()]
+        value_cols_str = self.get_param("value_columns", "")
+        value_cols = [c.strip() for c in value_cols_str.split(",") if c.strip()] if value_cols_str else None
+        var_name = self.get_param("var_name", "变量")
+        value_name = self.get_param("value_name", "值")
+        
+        # Validate id columns exist
+        for col in id_cols:
+            if col not in df.columns:
+                raise ValueError(f"标识列 '{col}' 不存在")
+        
+        # Validate value columns exist if specified
+        if value_cols:
+            for col in value_cols:
+                if col not in df.columns:
+                    raise ValueError(f"值列 '{col}' 不存在")
+        
+        # Perform melt (unpivot)
+        result = pd.melt(
+            df,
+            id_vars=id_cols,
+            value_vars=value_cols,
+            var_name=var_name,
+            value_name=value_name
+        )
+        
+        return {"data": result}
+
+
+@register_node
+class CrossTabNode(BaseNode):
+    """Node to create a cross-tabulation table"""
+    
+    node_type = "cross_tab"
+    node_name = "交叉表"
+    node_category = "汇总"
+    node_description = "创建交叉表，统计两个或多个变量的频率分布"
+    node_color = "#7c3aed"  # Violet
+    
+    def _setup_ports(self):
+        self.add_input("data")
+        self.add_output("data")
+    
+    def get_config_ui_schema(self) -> List[Dict[str, Any]]:
+        return [
+            {
+                "key": "row_column",
+                "label": "行变量",
+                "type": "text",
+                "required": True,
+                "placeholder": "例如: 性别"
+            },
+            {
+                "key": "col_column",
+                "label": "列变量",
+                "type": "text",
+                "required": True,
+                "placeholder": "例如: 年龄段"
+            },
+            {
+                "key": "value_column",
+                "label": "值列 (可选)",
+                "type": "text",
+                "default": "",
+                "placeholder": "用于汇总的数值列，留空则计数"
+            },
+            {
+                "key": "agg_function",
+                "label": "汇总函数",
+                "type": "select",
+                "options": [
+                    {"value": "count", "label": "计数"},
+                    {"value": "sum", "label": "求和"},
+                    {"value": "mean", "label": "平均值"},
+                    {"value": "min", "label": "最小值"},
+                    {"value": "max", "label": "最大值"}
+                ],
+                "default": "count"
+            },
+            {
+                "key": "normalize",
+                "label": "归一化",
+                "type": "select",
+                "options": [
+                    {"value": "none", "label": "不归一化"},
+                    {"value": "all", "label": "按总计"},
+                    {"value": "index", "label": "按行"},
+                    {"value": "columns", "label": "按列"}
+                ],
+                "default": "none"
+            },
+            {
+                "key": "margins",
+                "label": "显示合计",
+                "type": "checkbox",
+                "default": False
+            }
+        ]
+    
+    def validate(self) -> tuple[bool, str]:
+        if not self.get_param("row_column"):
+            return False, "行变量是必需的"
+        if not self.get_param("col_column"):
+            return False, "列变量是必需的"
+        return True, ""
+    
+    def execute(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
+        df = input_data.get("data")
+        if df is None:
+            raise ValueError("No input data received")
+        
+        import pandas as pd
+        import numpy as np
+        
+        row_col = self.get_param("row_column", "").strip()
+        col_col = self.get_param("col_column", "").strip()
+        value_col = self.get_param("value_column", "").strip()
+        agg_func = self.get_param("agg_function", "count")
+        normalize = self.get_param("normalize", "none")
+        margins = self.get_param("margins", False)
+        
+        # Validate columns
+        if row_col not in df.columns:
+            raise ValueError(f"行变量列 '{row_col}' 不存在")
+        if col_col not in df.columns:
+            raise ValueError(f"列变量列 '{col_col}' 不存在")
+        if value_col and value_col not in df.columns:
+            raise ValueError(f"值列 '{value_col}' 不存在")
+        
+        # Determine normalize parameter
+        norm_param = normalize if normalize != 'none' else False
+        
+        # Create cross tabulation
+        if value_col and agg_func != 'count':
+            # Use pivot_table for aggregation with values
+            result = pd.pivot_table(
+                df,
+                index=row_col,
+                columns=col_col,
+                values=value_col,
+                aggfunc=agg_func,
+                margins=margins,
+                margins_name='合计'
+            )
+        else:
+            # Use crosstab for counting
+            result = pd.crosstab(
+                df[row_col],
+                df[col_col],
+                margins=margins,
+                margins_name='合计',
+                normalize=norm_param
+            )
+        
+        # Reset index to make it a regular DataFrame
+        result = result.reset_index()
+        
+        return {"data": result}
+
+
+# ============================================================================
+# 批量文件处理节点
+# ============================================================================
+
+@register_node
+class BatchReadExcelNode(BaseNode):
+    """Node to read multiple Excel files from a folder"""
+    
+    node_type = "batch_read_excel"
+    node_name = "批量读取Excel"
+    node_category = "批量处理"
+    node_description = "从文件夹批量读取多个Excel文件并合并"
+    node_color = "#f59e0b"  # Amber
+    
+    def _setup_ports(self):
+        self.add_output("data")
+        self.add_output("file_list")
+    
+    def get_config_ui_schema(self) -> List[Dict[str, Any]]:
+        return [
+            {
+                "key": "folder_path",
+                "label": "文件夹路径",
+                "type": "folder",
+                "required": True
+            },
+            {
+                "key": "pattern",
+                "label": "文件匹配模式",
+                "type": "text",
+                "default": "*.xlsx",
+                "placeholder": "例如: *.xlsx, report_*.xls"
+            },
+            {
+                "key": "recursive",
+                "label": "包含子文件夹",
+                "type": "checkbox",
+                "default": False
+            },
+            {
+                "key": "sheet_name",
+                "label": "工作表名称",
+                "type": "text",
+                "default": "",
+                "placeholder": "留空则读取第一个工作表"
+            },
+            {
+                "key": "add_filename_column",
+                "label": "添加文件名列",
+                "type": "checkbox",
+                "default": True
+            },
+            {
+                "key": "merge_mode",
+                "label": "合并模式",
+                "type": "select",
+                "options": [
+                    {"value": "concat", "label": "纵向合并 (追加行)"},
+                    {"value": "separate", "label": "不合并 (返回第一个文件)"}
+                ],
+                "default": "concat"
+            }
+        ]
+    
+    def validate(self) -> tuple[bool, str]:
+        folder_path = self.get_param("folder_path", "")
+        if not folder_path:
+            return False, "文件夹路径是必需的"
+        if not Path(folder_path).exists():
+            return False, f"文件夹不存在: {folder_path}"
+        return True, ""
+    
+    def execute(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
+        import glob
+        
+        folder_path = Path(self.get_param("folder_path"))
+        pattern = self.get_param("pattern", "*.xlsx")
+        recursive = self.get_param("recursive", False)
+        sheet_name = self.get_param("sheet_name", "") or 0
+        add_filename = self.get_param("add_filename_column", True)
+        merge_mode = self.get_param("merge_mode", "concat")
+        
+        # Find all matching files
+        if recursive:
+            files = list(folder_path.rglob(pattern))
+        else:
+            files = list(folder_path.glob(pattern))
+        
+        if not files:
+            raise ValueError(f"没有找到匹配 '{pattern}' 的文件")
+        
+        # Sort files by name
+        files = sorted(files)
+        
+        # Read all files
+        dfs = []
+        file_names = []
+        
+        for file_path in files:
+            try:
+                df = pd.read_excel(file_path, sheet_name=sheet_name)
+                if add_filename:
+                    df['_文件名'] = file_path.name
+                    df['_文件路径'] = str(file_path)
+                dfs.append(df)
+                file_names.append(str(file_path))
+            except Exception as e:
+                print(f"读取文件失败 {file_path}: {e}")
+        
+        if not dfs:
+            raise ValueError("没有成功读取任何文件")
+        
+        # Merge or return first
+        if merge_mode == "concat":
+            result = pd.concat(dfs, ignore_index=True)
+        else:
+            result = dfs[0]
+        
+        # Create file list DataFrame
+        file_list_df = pd.DataFrame({
+            '文件名': [Path(f).name for f in file_names],
+            '文件路径': file_names,
+            '行数': [len(df) for df in dfs]
+        })
+        
+        return {"data": result, "file_list": file_list_df}
+
+
+@register_node
+class BatchWriteExcelNode(BaseNode):
+    """Node to write data to multiple Excel files based on grouping"""
+    
+    node_type = "batch_write_excel"
+    node_name = "批量写入Excel"
+    node_category = "批量处理"
+    node_description = "按分组列将数据拆分并写入多个Excel文件"
+    node_color = "#f59e0b"  # Amber
+    
+    def _setup_ports(self):
+        self.add_input("data")
+        self.add_output("summary")
+    
+    def get_config_ui_schema(self) -> List[Dict[str, Any]]:
+        return [
+            {
+                "key": "output_folder",
+                "label": "输出文件夹",
+                "type": "folder",
+                "required": True
+            },
+            {
+                "key": "group_column",
+                "label": "分组列",
+                "type": "text",
+                "required": True,
+                "placeholder": "按此列的值拆分为多个文件"
+            },
+            {
+                "key": "filename_prefix",
+                "label": "文件名前缀",
+                "type": "text",
+                "default": "output_"
+            },
+            {
+                "key": "include_group_in_filename",
+                "label": "文件名包含分组值",
+                "type": "checkbox",
+                "default": True
+            },
+            {
+                "key": "sheet_name",
+                "label": "工作表名称",
+                "type": "text",
+                "default": "Sheet1"
+            }
+        ]
+    
+    def validate(self) -> tuple[bool, str]:
+        if not self.get_param("output_folder"):
+            return False, "输出文件夹是必需的"
+        if not self.get_param("group_column"):
+            return False, "分组列是必需的"
+        return True, ""
+    
+    def execute(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
+        df = input_data.get("data")
+        if df is None:
+            raise ValueError("No input data received")
+        
+        output_folder = Path(self.get_param("output_folder"))
+        group_col = self.get_param("group_column")
+        prefix = self.get_param("filename_prefix", "output_")
+        include_group = self.get_param("include_group_in_filename", True)
+        sheet_name = self.get_param("sheet_name", "Sheet1")
+        
+        # Create output folder if not exists
+        output_folder.mkdir(parents=True, exist_ok=True)
+        
+        if group_col not in df.columns:
+            raise ValueError(f"分组列 '{group_col}' 不存在")
+        
+        # Group and write files
+        summary = []
+        for group_value, group_df in df.groupby(group_col):
+            if include_group:
+                filename = f"{prefix}{group_value}.xlsx"
+            else:
+                filename = f"{prefix}{len(summary)+1}.xlsx"
+            
+            file_path = output_folder / filename
+            group_df.to_excel(file_path, sheet_name=sheet_name, index=False)
+            
+            summary.append({
+                '分组值': group_value,
+                '文件名': filename,
+                '行数': len(group_df)
+            })
+        
+        return {"summary": pd.DataFrame(summary)}
+
+
+# ============================================================================
+# 数据可视化节点
+# ============================================================================
+
+@register_node
+class ChartNode(BaseNode):
+    """Node to create charts from data"""
+    
+    node_type = "chart"
+    node_name = "创建图表"
+    node_category = "可视化"
+    node_description = "从数据创建柱状图、折线图、饼图等"
+    node_color = "#06b6d4"  # Cyan
+    
+    def _setup_ports(self):
+        self.add_input("data")
+        self.add_output("chart_path")
+    
+    def get_config_ui_schema(self) -> List[Dict[str, Any]]:
+        return [
+            {
+                "key": "chart_type",
+                "label": "图表类型",
+                "type": "select",
+                "options": [
+                    {"value": "bar", "label": "柱状图"},
+                    {"value": "barh", "label": "条形图 (横向)"},
+                    {"value": "line", "label": "折线图"},
+                    {"value": "pie", "label": "饼图"},
+                    {"value": "scatter", "label": "散点图"},
+                    {"value": "area", "label": "面积图"},
+                    {"value": "hist", "label": "直方图"}
+                ],
+                "default": "bar"
+            },
+            {
+                "key": "x_column",
+                "label": "X轴列 (分类)",
+                "type": "text",
+                "placeholder": "例如: 月份"
+            },
+            {
+                "key": "y_column",
+                "label": "Y轴列 (数值)",
+                "type": "text",
+                "required": True,
+                "placeholder": "例如: 销售额"
+            },
+            {
+                "key": "title",
+                "label": "图表标题",
+                "type": "text",
+                "default": ""
+            },
+            {
+                "key": "output_path",
+                "label": "保存路径",
+                "type": "file_save",
+                "file_filter": "PNG图片 (*.png);;PDF文件 (*.pdf);;所有文件 (*.*)",
+                "required": True
+            },
+            {
+                "key": "figsize_width",
+                "label": "图表宽度",
+                "type": "number",
+                "default": 10,
+                "min": 4,
+                "max": 20
+            },
+            {
+                "key": "figsize_height",
+                "label": "图表高度",
+                "type": "number",
+                "default": 6,
+                "min": 3,
+                "max": 15
+            },
+            {
+                "key": "show_legend",
+                "label": "显示图例",
+                "type": "checkbox",
+                "default": True
+            },
+            {
+                "key": "show_grid",
+                "label": "显示网格",
+                "type": "checkbox",
+                "default": True
+            }
+        ]
+    
+    def validate(self) -> tuple[bool, str]:
+        if not self.get_param("y_column"):
+            return False, "Y轴列是必需的"
+        if not self.get_param("output_path"):
+            return False, "保存路径是必需的"
+        return True, ""
+    
+    def execute(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
+        df = input_data.get("data")
+        if df is None:
+            raise ValueError("No input data received")
+        
+        import matplotlib
+        matplotlib.use('Agg')  # Non-interactive backend
+        import matplotlib.pyplot as plt
+        
+        # Set Chinese font support
+        plt.rcParams['font.sans-serif'] = ['SimHei', 'Microsoft YaHei', 'Arial Unicode MS']
+        plt.rcParams['axes.unicode_minus'] = False
+        
+        chart_type = self.get_param("chart_type", "bar")
+        x_col = self.get_param("x_column", "")
+        y_col = self.get_param("y_column")
+        title = self.get_param("title", "")
+        output_path = self.get_param("output_path")
+        width = self.get_param("figsize_width", 10)
+        height = self.get_param("figsize_height", 6)
+        show_legend = self.get_param("show_legend", True)
+        show_grid = self.get_param("show_grid", True)
+        
+        if y_col not in df.columns:
+            raise ValueError(f"Y轴列 '{y_col}' 不存在")
+        
+        fig, ax = plt.subplots(figsize=(width, height))
+        
+        if chart_type == "pie":
+            # Pie chart
+            if x_col and x_col in df.columns:
+                data = df.groupby(x_col)[y_col].sum()
+                ax.pie(data.values, labels=data.index, autopct='%1.1f%%')
+            else:
+                ax.pie(df[y_col].values, autopct='%1.1f%%')
+        elif chart_type == "hist":
+            # Histogram
+            ax.hist(df[y_col].dropna(), bins=20, edgecolor='black')
+            ax.set_xlabel(y_col)
+            ax.set_ylabel('频数')
+        elif chart_type == "scatter":
+            # Scatter plot
+            if x_col and x_col in df.columns:
+                ax.scatter(df[x_col], df[y_col])
+                ax.set_xlabel(x_col)
+            else:
+                ax.scatter(range(len(df)), df[y_col])
+            ax.set_ylabel(y_col)
+        else:
+            # Bar, line, area charts
+            if x_col and x_col in df.columns:
+                x_data = df[x_col]
+            else:
+                x_data = range(len(df))
+            
+            if chart_type == "bar":
+                ax.bar(x_data, df[y_col])
+            elif chart_type == "barh":
+                ax.barh(x_data, df[y_col])
+            elif chart_type == "line":
+                ax.plot(x_data, df[y_col], marker='o')
+            elif chart_type == "area":
+                ax.fill_between(range(len(df)), df[y_col], alpha=0.5)
+                ax.plot(range(len(df)), df[y_col])
+            
+            if x_col:
+                ax.set_xlabel(x_col)
+            ax.set_ylabel(y_col)
+        
+        if title:
+            ax.set_title(title)
+        
+        if show_grid and chart_type not in ["pie"]:
+            ax.grid(True, alpha=0.3)
+        
+        if show_legend and chart_type not in ["pie", "hist"]:
+            ax.legend([y_col])
+        
+        plt.tight_layout()
+        plt.savefig(output_path, dpi=150, bbox_inches='tight')
+        plt.close()
+        
+        return {"chart_path": pd.DataFrame([{"图表路径": output_path}])}
+
+
+@register_node
+class DataStatisticsNode(BaseNode):
+    """Node to generate data statistics summary"""
+    
+    node_type = "data_statistics"
+    node_name = "数据统计"
+    node_category = "可视化"
+    node_description = "生成数据的统计摘要（均值、中位数、标准差等）"
+    node_color = "#06b6d4"  # Cyan
+    
+    def _setup_ports(self):
+        self.add_input("data")
+        self.add_output("statistics")
+        self.add_output("data")
+    
+    def get_config_ui_schema(self) -> List[Dict[str, Any]]:
+        return [
+            {
+                "key": "columns",
+                "label": "统计列 (逗号分隔，留空表示所有数值列)",
+                "type": "text",
+                "default": ""
+            },
+            {
+                "key": "include_count",
+                "label": "包含计数",
+                "type": "checkbox",
+                "default": True
+            },
+            {
+                "key": "include_mean",
+                "label": "包含均值",
+                "type": "checkbox",
+                "default": True
+            },
+            {
+                "key": "include_std",
+                "label": "包含标准差",
+                "type": "checkbox",
+                "default": True
+            },
+            {
+                "key": "include_min_max",
+                "label": "包含最小/最大值",
+                "type": "checkbox",
+                "default": True
+            },
+            {
+                "key": "include_quartiles",
+                "label": "包含四分位数",
+                "type": "checkbox",
+                "default": True
+            },
+            {
+                "key": "include_missing",
+                "label": "包含缺失值统计",
+                "type": "checkbox",
+                "default": True
+            }
+        ]
+    
+    def execute(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
+        df = input_data.get("data")
+        if df is None:
+            raise ValueError("No input data received")
+        
+        columns_str = self.get_param("columns", "")
+        if columns_str:
+            columns = [c.strip() for c in columns_str.split(",") if c.strip()]
+        else:
+            columns = df.select_dtypes(include=['number']).columns.tolist()
+        
+        if not columns:
+            raise ValueError("没有找到数值列进行统计")
+        
+        stats = []
+        for col in columns:
+            if col not in df.columns:
+                continue
+            
+            col_data = df[col]
+            row = {"列名": col}
+            
+            if self.get_param("include_count", True):
+                row["计数"] = col_data.count()
+            
+            if self.get_param("include_missing", True):
+                row["缺失值"] = col_data.isna().sum()
+                row["缺失率%"] = round(col_data.isna().sum() / len(df) * 100, 2)
+            
+            # Only calculate numeric stats for numeric columns
+            if pd.api.types.is_numeric_dtype(col_data):
+                if self.get_param("include_mean", True):
+                    row["均值"] = round(col_data.mean(), 4)
+                
+                if self.get_param("include_std", True):
+                    row["标准差"] = round(col_data.std(), 4)
+                
+                if self.get_param("include_min_max", True):
+                    row["最小值"] = col_data.min()
+                    row["最大值"] = col_data.max()
+                
+                if self.get_param("include_quartiles", True):
+                    row["25%"] = col_data.quantile(0.25)
+                    row["50%"] = col_data.quantile(0.50)
+                    row["75%"] = col_data.quantile(0.75)
+            
+            stats.append(row)
+        
+        return {"statistics": pd.DataFrame(stats), "data": df}
+
+
+# ============================================================================
+# 更多数据源节点
+# ============================================================================
+
+@register_node
+class ReadCSVNode(BaseNode):
+    """Node to read CSV files"""
+    
+    node_type = "read_csv"
+    node_name = "读取CSV"
+    node_category = "输入/输出"
+    node_description = "从CSV文件读取数据"
+    node_color = "#22c55e"  # Green
+    
+    def _setup_ports(self):
+        self.add_output("data")
+    
+    def get_config_ui_schema(self) -> List[Dict[str, Any]]:
+        return [
+            {
+                "key": "file_path",
+                "label": "文件路径",
+                "type": "file",
+                "file_filter": "CSV文件 (*.csv);;所有文件 (*.*)",
+                "required": True
+            },
+            {
+                "key": "encoding",
+                "label": "编码",
+                "type": "select",
+                "options": [
+                    {"value": "utf-8", "label": "UTF-8"},
+                    {"value": "gbk", "label": "GBK (中文)"},
+                    {"value": "gb2312", "label": "GB2312"},
+                    {"value": "utf-16", "label": "UTF-16"},
+                    {"value": "latin1", "label": "Latin-1"}
+                ],
+                "default": "utf-8"
+            },
+            {
+                "key": "delimiter",
+                "label": "分隔符",
+                "type": "select",
+                "options": [
+                    {"value": ",", "label": "逗号 (,)"},
+                    {"value": ";", "label": "分号 (;)"},
+                    {"value": "\\t", "label": "制表符 (Tab)"},
+                    {"value": "|", "label": "竖线 (|)"}
+                ],
+                "default": ","
+            },
+            {
+                "key": "header_row",
+                "label": "标题行",
+                "type": "number",
+                "default": 0,
+                "min": 0
+            }
+        ]
+    
+    def validate(self) -> tuple[bool, str]:
+        file_path = self.get_param("file_path", "")
+        if not file_path:
+            return False, "文件路径是必需的"
+        if not Path(file_path).exists():
+            return False, f"文件不存在: {file_path}"
+        return True, ""
+    
+    def execute(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
+        file_path = self.get_param("file_path")
+        encoding = self.get_param("encoding", "utf-8")
+        delimiter = self.get_param("delimiter", ",")
+        header_row = self.get_param("header_row", 0)
+        
+        # Handle tab delimiter
+        if delimiter == "\\t":
+            delimiter = "\t"
+        
+        df = pd.read_csv(
+            file_path,
+            encoding=encoding,
+            delimiter=delimiter,
+            header=header_row
+        )
+        
+        return {"data": df}
+
+
+@register_node
+class WriteCSVNode(BaseNode):
+    """Node to write CSV files"""
+    
+    node_type = "write_csv"
+    node_name = "写入CSV"
+    node_category = "输入/输出"
+    node_description = "将数据写入CSV文件"
+    node_color = "#22c55e"  # Green
+    
+    def _setup_ports(self):
+        self.add_input("data")
+        self.add_output("data")
+    
+    def get_config_ui_schema(self) -> List[Dict[str, Any]]:
+        return [
+            {
+                "key": "file_path",
+                "label": "保存路径",
+                "type": "file_save",
+                "file_filter": "CSV文件 (*.csv);;所有文件 (*.*)",
+                "required": True
+            },
+            {
+                "key": "encoding",
+                "label": "编码",
+                "type": "select",
+                "options": [
+                    {"value": "utf-8-sig", "label": "UTF-8 (带BOM，Excel兼容)"},
+                    {"value": "utf-8", "label": "UTF-8"},
+                    {"value": "gbk", "label": "GBK (中文)"}
+                ],
+                "default": "utf-8-sig"
+            },
+            {
+                "key": "include_index",
+                "label": "包含索引列",
+                "type": "checkbox",
+                "default": False
+            }
+        ]
+    
+    def validate(self) -> tuple[bool, str]:
+        if not self.get_param("file_path"):
+            return False, "保存路径是必需的"
+        return True, ""
+    
+    def execute(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
+        df = input_data.get("data")
+        if df is None:
+            raise ValueError("No input data received")
+        
+        file_path = self.get_param("file_path")
+        encoding = self.get_param("encoding", "utf-8-sig")
+        include_index = self.get_param("include_index", False)
+        
+        df.to_csv(file_path, encoding=encoding, index=include_index)
+        
+        return {"data": df}
+
+
+@register_node
+class ReadJSONNode(BaseNode):
+    """Node to read JSON files"""
+    
+    node_type = "read_json"
+    node_name = "读取JSON"
+    node_category = "输入/输出"
+    node_description = "从JSON文件读取数据"
+    node_color = "#22c55e"  # Green
+    
+    def _setup_ports(self):
+        self.add_output("data")
+    
+    def get_config_ui_schema(self) -> List[Dict[str, Any]]:
+        return [
+            {
+                "key": "file_path",
+                "label": "文件路径",
+                "type": "file",
+                "file_filter": "JSON文件 (*.json);;所有文件 (*.*)",
+                "required": True
+            },
+            {
+                "key": "orient",
+                "label": "JSON格式",
+                "type": "select",
+                "options": [
+                    {"value": "records", "label": "记录数组 [{...}, {...}]"},
+                    {"value": "columns", "label": "列对象 {col: [...]}"},
+                    {"value": "index", "label": "索引对象 {idx: {...}}"},
+                    {"value": "values", "label": "值数组 [[...], [...]]"}
+                ],
+                "default": "records"
+            },
+            {
+                "key": "encoding",
+                "label": "编码",
+                "type": "select",
+                "options": [
+                    {"value": "utf-8", "label": "UTF-8"},
+                    {"value": "gbk", "label": "GBK"}
+                ],
+                "default": "utf-8"
+            }
+        ]
+    
+    def validate(self) -> tuple[bool, str]:
+        file_path = self.get_param("file_path", "")
+        if not file_path:
+            return False, "文件路径是必需的"
+        if not Path(file_path).exists():
+            return False, f"文件不存在: {file_path}"
+        return True, ""
+    
+    def execute(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
+        file_path = self.get_param("file_path")
+        orient = self.get_param("orient", "records")
+        encoding = self.get_param("encoding", "utf-8")
+        
+        df = pd.read_json(file_path, orient=orient, encoding=encoding)
+        
+        return {"data": df}
+
+
+@register_node
+class WriteJSONNode(BaseNode):
+    """Node to write JSON files"""
+    
+    node_type = "write_json"
+    node_name = "写入JSON"
+    node_category = "输入/输出"
+    node_description = "将数据写入JSON文件"
+    node_color = "#22c55e"  # Green
+    
+    def _setup_ports(self):
+        self.add_input("data")
+        self.add_output("data")
+    
+    def get_config_ui_schema(self) -> List[Dict[str, Any]]:
+        return [
+            {
+                "key": "file_path",
+                "label": "保存路径",
+                "type": "file_save",
+                "file_filter": "JSON文件 (*.json);;所有文件 (*.*)",
+                "required": True
+            },
+            {
+                "key": "orient",
+                "label": "JSON格式",
+                "type": "select",
+                "options": [
+                    {"value": "records", "label": "记录数组 [{...}, {...}]"},
+                    {"value": "columns", "label": "列对象 {col: [...]}"},
+                    {"value": "index", "label": "索引对象 {idx: {...}}"}
+                ],
+                "default": "records"
+            },
+            {
+                "key": "indent",
+                "label": "缩进空格数",
+                "type": "number",
+                "default": 2,
+                "min": 0,
+                "max": 8
+            },
+            {
+                "key": "force_ascii",
+                "label": "强制ASCII (转义中文)",
+                "type": "checkbox",
+                "default": False
+            }
+        ]
+    
+    def validate(self) -> tuple[bool, str]:
+        if not self.get_param("file_path"):
+            return False, "保存路径是必需的"
+        return True, ""
+    
+    def execute(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
+        df = input_data.get("data")
+        if df is None:
+            raise ValueError("No input data received")
+        
+        file_path = self.get_param("file_path")
+        orient = self.get_param("orient", "records")
+        indent = self.get_param("indent", 2)
+        force_ascii = self.get_param("force_ascii", False)
+        
+        df.to_json(file_path, orient=orient, indent=indent, force_ascii=force_ascii)
+        
+        return {"data": df}
+
+
+# ============================================================================
+# 数据验证和质量节点
+# ============================================================================
+
+@register_node
+class DataValidationNode(BaseNode):
+    """Node to validate data quality"""
+    
+    node_type = "data_validation"
+    node_name = "数据验证"
+    node_category = "清洗"
+    node_description = "验证数据质量，检查空值、重复值、数据类型等"
+    node_color = "#ef4444"  # Red
+    
+    def _setup_ports(self):
+        self.add_input("data")
+        self.add_output("valid_data")
+        self.add_output("invalid_data")
+        self.add_output("report")
+    
+    def get_config_ui_schema(self) -> List[Dict[str, Any]]:
+        return [
+            {
+                "key": "check_nulls",
+                "label": "检查空值",
+                "type": "checkbox",
+                "default": True
+            },
+            {
+                "key": "null_columns",
+                "label": "空值检查列 (逗号分隔，留空检查所有)",
+                "type": "text",
+                "default": ""
+            },
+            {
+                "key": "check_duplicates",
+                "label": "检查重复行",
+                "type": "checkbox",
+                "default": True
+            },
+            {
+                "key": "duplicate_columns",
+                "label": "重复检查列 (逗号分隔，留空检查所有)",
+                "type": "text",
+                "default": ""
+            },
+            {
+                "key": "check_numeric",
+                "label": "检查数值范围",
+                "type": "checkbox",
+                "default": False
+            },
+            {
+                "key": "numeric_column",
+                "label": "数值检查列",
+                "type": "text",
+                "default": ""
+            },
+            {
+                "key": "min_value",
+                "label": "最小值",
+                "type": "number",
+                "default": 0
+            },
+            {
+                "key": "max_value",
+                "label": "最大值",
+                "type": "number",
+                "default": 999999
+            }
+        ]
+    
+    def execute(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
+        df = input_data.get("data")
+        if df is None:
+            raise ValueError("No input data received")
+        
+        df = df.copy()
+        invalid_mask = pd.Series([False] * len(df), index=df.index)
+        issues = []
+        
+        # Check nulls
+        if self.get_param("check_nulls", True):
+            null_cols_str = self.get_param("null_columns", "")
+            if null_cols_str:
+                null_cols = [c.strip() for c in null_cols_str.split(",")]
+            else:
+                null_cols = df.columns.tolist()
+            
+            for col in null_cols:
+                if col in df.columns:
+                    null_count = df[col].isna().sum()
+                    if null_count > 0:
+                        issues.append({
+                            "检查类型": "空值",
+                            "列名": col,
+                            "问题数量": null_count,
+                            "问题描述": f"列 '{col}' 包含 {null_count} 个空值"
+                        })
+                        invalid_mask |= df[col].isna()
+        
+        # Check duplicates
+        if self.get_param("check_duplicates", True):
+            dup_cols_str = self.get_param("duplicate_columns", "")
+            if dup_cols_str:
+                dup_cols = [c.strip() for c in dup_cols_str.split(",")]
+            else:
+                dup_cols = None
+            
+            if dup_cols:
+                dup_mask = df.duplicated(subset=dup_cols, keep='first')
+            else:
+                dup_mask = df.duplicated(keep='first')
+            
+            dup_count = dup_mask.sum()
+            if dup_count > 0:
+                issues.append({
+                    "检查类型": "重复",
+                    "列名": str(dup_cols) if dup_cols else "所有列",
+                    "问题数量": dup_count,
+                    "问题描述": f"发现 {dup_count} 行重复数据"
+                })
+                invalid_mask |= dup_mask
+        
+        # Check numeric range
+        if self.get_param("check_numeric", False):
+            num_col = self.get_param("numeric_column", "")
+            if num_col and num_col in df.columns:
+                min_val = self.get_param("min_value", 0)
+                max_val = self.get_param("max_value", 999999)
+                
+                range_mask = (df[num_col] < min_val) | (df[num_col] > max_val)
+                range_count = range_mask.sum()
+                if range_count > 0:
+                    issues.append({
+                        "检查类型": "范围",
+                        "列名": num_col,
+                        "问题数量": range_count,
+                        "问题描述": f"列 '{num_col}' 有 {range_count} 个值超出范围 [{min_val}, {max_val}]"
+                    })
+                    invalid_mask |= range_mask
+        
+        valid_data = df[~invalid_mask]
+        invalid_data = df[invalid_mask]
+        
+        if not issues:
+            issues.append({
+                "检查类型": "通过",
+                "列名": "-",
+                "问题数量": 0,
+                "问题描述": "所有数据验证通过"
+            })
+        
+        return {
+            "valid_data": valid_data,
+            "invalid_data": invalid_data,
+            "report": pd.DataFrame(issues)
+        }
+
+
+# ============================================================================
+# 高级计算节点
+# ============================================================================
+
+@register_node
+class FormulaNode(BaseNode):
+    """Node to apply custom formulas"""
+    
+    node_type = "formula"
+    node_name = "公式计算"
+    node_category = "计算"
+    node_description = "使用自定义公式创建新列"
+    node_color = "#8b5cf6"  # Purple
+    
+    def _setup_ports(self):
+        self.add_input("data")
+        self.add_output("data")
+    
+    def get_config_ui_schema(self) -> List[Dict[str, Any]]:
+        return [
+            {
+                "key": "new_column",
+                "label": "新列名",
+                "type": "text",
+                "required": True,
+                "placeholder": "例如: 总计"
+            },
+            {
+                "key": "formula",
+                "label": "公式表达式",
+                "type": "text",
+                "required": True,
+                "placeholder": "例如: col['价格'] * col['数量']"
+            },
+            {
+                "key": "help_text",
+                "label": "公式说明",
+                "type": "label",
+                "default": "使用 col['列名'] 引用列。支持: +, -, *, /, **, abs(), round(), max(), min()"
+            }
+        ]
+    
+    def validate(self) -> tuple[bool, str]:
+        if not self.get_param("new_column"):
+            return False, "新列名是必需的"
+        if not self.get_param("formula"):
+            return False, "公式表达式是必需的"
+        return True, ""
+    
+    def execute(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
+        df = input_data.get("data")
+        if df is None:
+            raise ValueError("No input data received")
+        
+        df = df.copy()
+        new_col = self.get_param("new_column")
+        formula = self.get_param("formula")
+        
+        # Create a safe evaluation context
+        import numpy as np
+        col = df  # Allow col['column_name'] syntax
+        
+        try:
+            # Evaluate the formula
+            result = eval(formula, {"__builtins__": {}, "col": df, "abs": abs, "round": round, 
+                                   "max": max, "min": min, "np": np, "pd": pd})
+            df[new_col] = result
+        except Exception as e:
+            raise ValueError(f"公式计算错误: {e}")
+        
+        return {"data": df}
+
+
+@register_node
+class ConditionalNode(BaseNode):
+    """Node to apply conditional logic"""
+    
+    node_type = "conditional"
+    node_name = "条件判断"
+    node_category = "计算"
+    node_description = "根据条件创建新列或分类数据"
+    node_color = "#8b5cf6"  # Purple
+    
+    def _setup_ports(self):
+        self.add_input("data")
+        self.add_output("data")
+    
+    def get_config_ui_schema(self) -> List[Dict[str, Any]]:
+        return [
+            {
+                "key": "condition_column",
+                "label": "条件列",
+                "type": "text",
+                "required": True
+            },
+            {
+                "key": "operator",
+                "label": "比较运算符",
+                "type": "select",
+                "options": [
+                    {"value": ">", "label": "大于 (>)"},
+                    {"value": ">=", "label": "大于等于 (>=)"},
+                    {"value": "<", "label": "小于 (<)"},
+                    {"value": "<=", "label": "小于等于 (<=)"},
+                    {"value": "==", "label": "等于 (==)"},
+                    {"value": "!=", "label": "不等于 (!=)"},
+                    {"value": "contains", "label": "包含"},
+                    {"value": "startswith", "label": "开头是"},
+                    {"value": "endswith", "label": "结尾是"}
+                ],
+                "default": ">"
+            },
+            {
+                "key": "compare_value",
+                "label": "比较值",
+                "type": "text",
+                "required": True
+            },
+            {
+                "key": "new_column",
+                "label": "结果列名",
+                "type": "text",
+                "required": True
+            },
+            {
+                "key": "true_value",
+                "label": "条件为真时的值",
+                "type": "text",
+                "default": "是"
+            },
+            {
+                "key": "false_value",
+                "label": "条件为假时的值",
+                "type": "text",
+                "default": "否"
+            }
+        ]
+    
+    def validate(self) -> tuple[bool, str]:
+        if not self.get_param("condition_column"):
+            return False, "条件列是必需的"
+        if not self.get_param("new_column"):
+            return False, "结果列名是必需的"
+        return True, ""
+    
+    def execute(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
+        df = input_data.get("data")
+        if df is None:
+            raise ValueError("No input data received")
+        
+        df = df.copy()
+        cond_col = self.get_param("condition_column")
+        operator = self.get_param("operator", ">")
+        compare_val = self.get_param("compare_value")
+        new_col = self.get_param("new_column")
+        true_val = self.get_param("true_value", "是")
+        false_val = self.get_param("false_value", "否")
+        
+        if cond_col not in df.columns:
+            raise ValueError(f"条件列 '{cond_col}' 不存在")
+        
+        # Try to convert compare_value to number if possible
+        try:
+            compare_val_num = float(compare_val)
+        except ValueError:
+            compare_val_num = None
+        
+        # Apply condition
+        col_data = df[cond_col]
+        
+        if operator == ">":
+            mask = col_data > (compare_val_num if compare_val_num is not None else compare_val)
+        elif operator == ">=":
+            mask = col_data >= (compare_val_num if compare_val_num is not None else compare_val)
+        elif operator == "<":
+            mask = col_data < (compare_val_num if compare_val_num is not None else compare_val)
+        elif operator == "<=":
+            mask = col_data <= (compare_val_num if compare_val_num is not None else compare_val)
+        elif operator == "==":
+            mask = col_data == (compare_val_num if compare_val_num is not None else compare_val)
+        elif operator == "!=":
+            mask = col_data != (compare_val_num if compare_val_num is not None else compare_val)
+        elif operator == "contains":
+            mask = col_data.astype(str).str.contains(compare_val, na=False)
+        elif operator == "startswith":
+            mask = col_data.astype(str).str.startswith(compare_val)
+        elif operator == "endswith":
+            mask = col_data.astype(str).str.endswith(compare_val)
+        else:
+            mask = pd.Series([False] * len(df))
+        
+        import numpy as np
+        df[new_col] = np.where(mask, true_val, false_val)
+        
+        return {"data": df}
+
+
+@register_node
+class LookupNode(BaseNode):
+    """Node to perform VLOOKUP-like operations"""
+    
+    node_type = "lookup"
+    node_name = "查找匹配"
+    node_category = "合并"
+    node_description = "类似Excel VLOOKUP，从另一个数据源查找匹配值"
+    node_color = "#3b82f6"  # Blue
+    
+    def _setup_ports(self):
+        self.add_input("data")
+        self.add_input("lookup_table")
+        self.add_output("data")
+    
+    def get_config_ui_schema(self) -> List[Dict[str, Any]]:
+        return [
+            {
+                "key": "lookup_key",
+                "label": "主表查找键",
+                "type": "text",
+                "required": True,
+                "placeholder": "主表中用于匹配的列"
+            },
+            {
+                "key": "lookup_table_key",
+                "label": "查找表匹配键",
+                "type": "text",
+                "required": True,
+                "placeholder": "查找表中用于匹配的列"
+            },
+            {
+                "key": "return_columns",
+                "label": "返回列 (逗号分隔)",
+                "type": "text",
+                "required": True,
+                "placeholder": "从查找表返回的列"
+            },
+            {
+                "key": "not_found_value",
+                "label": "未找到时的默认值",
+                "type": "text",
+                "default": ""
+            }
+        ]
+    
+    def validate(self) -> tuple[bool, str]:
+        if not self.get_param("lookup_key"):
+            return False, "主表查找键是必需的"
+        if not self.get_param("lookup_table_key"):
+            return False, "查找表匹配键是必需的"
+        if not self.get_param("return_columns"):
+            return False, "返回列是必需的"
+        return True, ""
+    
+    def execute(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
+        df = input_data.get("data")
+        lookup_df = input_data.get("lookup_table")
+        
+        if df is None:
+            raise ValueError("No input data received")
+        if lookup_df is None:
+            raise ValueError("No lookup table received")
+        
+        lookup_key = self.get_param("lookup_key")
+        lookup_table_key = self.get_param("lookup_table_key")
+        return_cols = [c.strip() for c in self.get_param("return_columns", "").split(",")]
+        not_found = self.get_param("not_found_value", "")
+        
+        if lookup_key not in df.columns:
+            raise ValueError(f"主表查找键 '{lookup_key}' 不存在")
+        if lookup_table_key not in lookup_df.columns:
+            raise ValueError(f"查找表匹配键 '{lookup_table_key}' 不存在")
+        
+        # Select only the key and return columns from lookup table
+        cols_to_merge = [lookup_table_key] + [c for c in return_cols if c in lookup_df.columns]
+        lookup_subset = lookup_df[cols_to_merge].drop_duplicates(subset=[lookup_table_key])
+        
+        # Merge
+        result = df.merge(
+            lookup_subset,
+            left_on=lookup_key,
+            right_on=lookup_table_key,
+            how='left'
+        )
+        
+        # Fill not found values
+        for col in return_cols:
+            if col in result.columns:
+                result[col] = result[col].fillna(not_found)
+        
+        # Remove duplicate key column if different names
+        if lookup_key != lookup_table_key and lookup_table_key in result.columns:
+            result = result.drop(columns=[lookup_table_key])
+        
+        return {"data": result}
+

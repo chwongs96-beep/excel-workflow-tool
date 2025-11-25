@@ -76,14 +76,30 @@ class WorkflowCanvas(QWidget):
         self.setAcceptDrops(True)
         
         # Theme state
-        self._is_dark_theme = True
+        self._is_dark_theme = False  # Default to light theme
         self._bg_color_dark = "#1a1a2e"
-        self._bg_color_light = "#e8e8e8"
+        self._bg_color_light = "#f5f5f5"
+        
+        # Node colors for themes
+        self._node_body_dark = "#2d2d3d"
+        self._node_body_light = "#ffffff"
+        self._node_border_dark = "#3d3d5c"
+        self._node_border_light = "#cccccc"
+        self._port_label_dark = "#aaaaaa"
+        self._port_label_light = "#666666"
+        self._port_border_dark = "#1a1a2e"
+        self._port_border_light = "#888888"
+        
+        # Minimap settings
+        self._show_minimap = True
+        self._minimap_size = 150
+        self._minimap_margin = 10
+        self._minimap_dragging = False
         
         # Background
         self.setAutoFillBackground(True)
         palette = self.palette()
-        palette.setColor(self.backgroundRole(), QColor(self._bg_color_dark))
+        palette.setColor(self.backgroundRole(), QColor(self._bg_color_light))
         self.setPalette(palette)
     
     def set_workflow(self, workflow: Workflow):
@@ -239,6 +255,10 @@ class WorkflowCanvas(QWidget):
             # Draw nodes
             for node_id, node in list(self.workflow.nodes.items()):
                 self._draw_node(painter, node, node_id == self.selected_node)
+            
+            # Draw minimap
+            if self._show_minimap and self.workflow.nodes:
+                self._draw_minimap(painter)
         except Exception as e:
             print(f"Paint error: {e}")
     
@@ -328,10 +348,13 @@ class WorkflowCanvas(QWidget):
         """Draw a single node"""
         rect = self.get_node_rect(node)
         
-        # Node colors
+        # Node colors based on theme
         color = QColor(node.node_color)
         header_color = color
-        body_color = QColor("#2d2d3d")
+        body_color = QColor(self._node_body_dark if self._is_dark_theme else self._node_body_light)
+        border_color = QColor(self._node_border_dark if self._is_dark_theme else self._node_border_light)
+        port_label_color = QColor(self._port_label_dark if self._is_dark_theme else self._port_label_light)
+        port_border_color = QColor(self._port_border_dark if self._is_dark_theme else self._port_border_light)
         
         # Check node status for glow effect
         node_status = self.node_status.get(node.node_id, None)
@@ -371,7 +394,7 @@ class WorkflowCanvas(QWidget):
         if selected:
             painter.setPen(QPen(color, 2))
         else:
-            painter.setPen(QPen(QColor("#3d3d5c"), 1))
+            painter.setPen(QPen(border_color, 1))
         painter.drawRoundedRect(rect, 
                                self.CORNER_RADIUS * self.scale,
                                self.CORNER_RADIUS * self.scale)
@@ -433,13 +456,13 @@ class WorkflowCanvas(QWidget):
             
             # Port circle
             painter.setBrush(QBrush(QColor("#4ade80")))
-            painter.setPen(QPen(QColor("#1a1a2e"), 2))
+            painter.setPen(QPen(port_border_color, 2))
             painter.drawEllipse(pos, 
                               int(self.PORT_RADIUS * self.scale),
                               int(self.PORT_RADIUS * self.scale))
             
             # Port label
-            painter.setPen(QPen(QColor("#aaaaaa")))
+            painter.setPen(QPen(port_label_color))
             label_rect = QRectF(pos.x() + 12 * self.scale, 
                                pos.y() - 8 * self.scale,
                                80 * self.scale, 16 * self.scale)
@@ -452,13 +475,13 @@ class WorkflowCanvas(QWidget):
             
             # Port circle
             painter.setBrush(QBrush(QColor("#f472b6")))
-            painter.setPen(QPen(QColor("#1a1a2e"), 2))
+            painter.setPen(QPen(port_border_color, 2))
             painter.drawEllipse(pos,
                               int(self.PORT_RADIUS * self.scale),
                               int(self.PORT_RADIUS * self.scale))
             
             # Port label
-            painter.setPen(QPen(QColor("#aaaaaa")))
+            painter.setPen(QPen(port_label_color))
             fm = QFontMetrics(port_font)
             label_width = fm.horizontalAdvance(port.name)
             label_rect = QRectF(pos.x() - label_width - 12 * self.scale,
@@ -514,6 +537,116 @@ class WorkflowCanvas(QWidget):
         painter.setPen(pen)
         painter.setBrush(Qt.BrushStyle.NoBrush)
         painter.drawPath(path)
+    
+    def _draw_minimap(self, painter: QPainter):
+        """Draw minimap in the corner"""
+        if not self.workflow.nodes:
+            return
+        
+        # Calculate minimap position (bottom-right corner)
+        minimap_rect = QRectF(
+            self.width() - self._minimap_size - self._minimap_margin,
+            self.height() - self._minimap_size - self._minimap_margin,
+            self._minimap_size,
+            self._minimap_size
+        )
+        
+        # Draw minimap background
+        painter.save()
+        if self._is_dark_theme:
+            bg_color = QColor(30, 30, 50, 200)
+            border_color = QColor(60, 60, 100)
+        else:
+            bg_color = QColor(255, 255, 255, 220)
+            border_color = QColor(180, 180, 180)
+        
+        painter.setBrush(QBrush(bg_color))
+        painter.setPen(QPen(border_color, 1))
+        painter.drawRoundedRect(minimap_rect, 5, 5)
+        
+        # Calculate bounds of all nodes
+        min_x = min_y = float('inf')
+        max_x = max_y = float('-inf')
+        
+        for node in self.workflow.nodes.values():
+            x, y = node.position
+            min_x = min(min_x, x)
+            min_y = min(min_y, y)
+            max_x = max(max_x, x + self.NODE_WIDTH)
+            max_y = max(max_y, y + self.NODE_HEIGHT)
+        
+        # Add padding
+        padding = 50
+        min_x -= padding
+        min_y -= padding
+        max_x += padding
+        max_y += padding
+        
+        world_width = max_x - min_x
+        world_height = max_y - min_y
+        
+        if world_width <= 0 or world_height <= 0:
+            painter.restore()
+            return
+        
+        # Calculate scale to fit in minimap
+        minimap_inner = minimap_rect.adjusted(5, 5, -5, -5)
+        scale_x = minimap_inner.width() / world_width
+        scale_y = minimap_inner.height() / world_height
+        minimap_scale = min(scale_x, scale_y)
+        
+        # Center the content
+        scaled_width = world_width * minimap_scale
+        scaled_height = world_height * minimap_scale
+        offset_x = minimap_inner.x() + (minimap_inner.width() - scaled_width) / 2
+        offset_y = minimap_inner.y() + (minimap_inner.height() - scaled_height) / 2
+        
+        # Draw nodes in minimap
+        for node in self.workflow.nodes.values():
+            x, y = node.position
+            node_x = offset_x + (x - min_x) * minimap_scale
+            node_y = offset_y + (y - min_y) * minimap_scale
+            node_w = self.NODE_WIDTH * minimap_scale
+            node_h = self.NODE_HEIGHT * minimap_scale
+            
+            node_color = QColor(node.node_color)
+            painter.setBrush(QBrush(node_color))
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.drawRoundedRect(QRectF(node_x, node_y, node_w, node_h), 2, 2)
+        
+        # Draw viewport rectangle
+        view_x = (-self.offset.x() / self.scale - min_x) * minimap_scale + offset_x
+        view_y = (-self.offset.y() / self.scale - min_y) * minimap_scale + offset_y
+        view_w = (self.width() / self.scale) * minimap_scale
+        view_h = (self.height() / self.scale) * minimap_scale
+        
+        viewport_color = QColor("#3b82f6") if self._is_dark_theme else QColor("#2563eb")
+        viewport_color.setAlpha(100)
+        painter.setBrush(QBrush(viewport_color))
+        painter.setPen(QPen(QColor("#3b82f6"), 1))
+        painter.drawRect(QRectF(view_x, view_y, view_w, view_h))
+        
+        # Draw minimap label
+        painter.setPen(QPen(border_color))
+        font = QFont("Segoe UI", 8)
+        painter.setFont(font)
+        painter.drawText(int(minimap_rect.x() + 5), int(minimap_rect.y() + 12), "小地图")
+        
+        painter.restore()
+    
+    def toggle_minimap(self):
+        """Toggle minimap visibility"""
+        self._show_minimap = not self._show_minimap
+        self.update()
+    
+    def _get_minimap_rect(self) -> QRectF:
+        """Get the minimap rectangle"""
+        return QRectF(
+            self.width() - self._minimap_size - self._minimap_margin,
+            self.height() - self._minimap_size - self._minimap_margin,
+            self._minimap_size,
+            self._minimap_size
+        )
     
     def mousePressEvent(self, event: QMouseEvent):
         """Handle mouse press"""
