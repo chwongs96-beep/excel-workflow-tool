@@ -453,10 +453,17 @@ class SheetCopyNode(BaseNode):
                 "placeholder": "CSV文件可忽略此项"
             },
             {
+                "key": "header_row",
+                "label": "标题所在行 (从0开始)",
+                "type": "number",
+                "default": 0,
+                "min": 0
+            },
+            {
                 "key": "target_sheet",
                 "label": "目标工作表名称",
                 "type": "sheet_selector",
-                "dependency": "file_path",
+                "dependency": "__upstream__",
                 "required": True,
                 "placeholder": "选择或输入目标工作表名称"
             },
@@ -476,6 +483,24 @@ class SheetCopyNode(BaseNode):
                 "label": "列映射 (仅指定列模式)",
                 "type": "text",
                 "placeholder": "格式: 源列A=目标列B; 源列C=目标列D"
+            },
+            {
+                "key": "filter_query",
+                "label": "行过滤条件 (Pandas Query)",
+                "type": "text",
+                "placeholder": "例如: 状态 == '完成' and 金额 > 1000"
+            },
+            {
+                "key": "remove_duplicates",
+                "label": "去除重复行",
+                "type": "checkbox",
+                "default": False
+            },
+            {
+                "key": "strip_whitespace",
+                "label": "去除文本首尾空格",
+                "type": "checkbox",
+                "default": True
             },
             {
                 "key": "write_mode",
@@ -515,28 +540,54 @@ class SheetCopyNode(BaseNode):
         write_mode = self.get_param("write_mode", "overwrite")
         col_mapping_str = self.get_param("column_mapping", "")
         
+        header_row = self.get_param("header_row", 0)
+        filter_query = self.get_param("filter_query", "")
+        remove_duplicates = self.get_param("remove_duplicates", False)
+        strip_whitespace = self.get_param("strip_whitespace", True)
+        
         # 1. Read Source Data
         try:
             is_csv = str(file_path).lower().endswith('.csv')
             if is_csv:
                 try:
-                    df = pd.read_csv(file_path)
+                    df = pd.read_csv(file_path, header=header_row)
                 except UnicodeDecodeError:
                     try:
-                        df = pd.read_csv(file_path, encoding='gbk')
+                        df = pd.read_csv(file_path, encoding='gbk', header=header_row)
                     except UnicodeDecodeError:
-                        df = pd.read_csv(file_path, encoding='utf-8-sig')
+                        df = pd.read_csv(file_path, encoding='utf-8-sig', header=header_row)
             else:
                 # Excel
                 if not src_sheet_name:
                     # Default to first sheet if not specified
-                    df = pd.read_excel(file_path, sheet_name=0)
+                    df = pd.read_excel(file_path, sheet_name=0, header=header_row)
                 else:
-                    df = pd.read_excel(file_path, sheet_name=src_sheet_name)
+                    df = pd.read_excel(file_path, sheet_name=src_sheet_name, header=header_row)
         except Exception as e:
             raise ValueError(f"读取来源文件失败: {e}")
             
-        # 2. Process Data based on Mode
+        # 2. Pre-process Data (Cleaning & Filtering)
+        
+        # Strip whitespace from string columns
+        if strip_whitespace:
+            df = df.apply(lambda x: x.str.strip() if x.dtype == "object" else x)
+            # Also strip column names if they are strings
+            df.columns = df.columns.map(lambda x: x.strip() if isinstance(x, str) else x)
+            
+        # Filter rows
+        if filter_query:
+            try:
+                # Support simple syntax like: 状态 == '完成'
+                # Pandas query uses the dataframe's columns
+                df = df.query(filter_query)
+            except Exception as e:
+                raise ValueError(f"行过滤条件错误: {e}")
+        
+        # Remove duplicates
+        if remove_duplicates:
+            df = df.drop_duplicates()
+
+        # 3. Process Data based on Mode
         if copy_mode == "no_blank":
             # Remove rows where all elements are NaN
             df = df.dropna(how='all')
@@ -576,7 +627,7 @@ class SheetCopyNode(BaseNode):
             
             df = new_df
 
-        # 3. Write to Target
+        # 4. Write to Target
         if target_sheet in workbook and write_mode == "append":
             target_df = workbook[target_sheet]
             # Align columns if appending?

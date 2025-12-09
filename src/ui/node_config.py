@@ -344,6 +344,9 @@ class NodeConfigPanel(QWidget):
         combo.setCurrentText(str(current_value))
         combo.currentTextChanged.connect(lambda t: self._on_value_changed(key, t))
         
+        # Set size policy to expand
+        combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        
         layout.addWidget(combo)
         
         refresh_btn = QPushButton("🔄")
@@ -355,19 +358,35 @@ class NodeConfigPanel(QWidget):
         # Handle dependency
         dependency = field.get("dependency")
         if dependency:
-            # Initial population
-            file_path = self.node.get_param(dependency)
+            file_path = None
+            
+            if dependency == "__upstream__":
+                file_path = self._find_upstream_file_path()
+            else:
+                # Initial population
+                # First check if we have a value in the node
+                file_path = self.node.get_param(dependency)
+                
+                # If not, try to find it from upstream (auto-fill logic might have missed it or not run yet)
+                if not file_path and self.workflow:
+                    upstream_path = self._find_upstream_file_path()
+                    if upstream_path:
+                        file_path = upstream_path
+                        # We don't set param here to avoid side effects during widget creation,
+                        # but we use it to populate the list.
+            
             if file_path:
                 self._populate_sheets(combo, file_path)
             
-            # Connect to dependency change
-            dep_widget = self.field_widgets.get(dependency)
-            if dep_widget:
-                # Find QLineEdit in the dependency widget
-                line_edits = dep_widget.findChildren(QLineEdit)
-                if line_edits:
-                    le = line_edits[0]
-                    le.textChanged.connect(lambda text: self._populate_sheets(combo, text))
+            # Connect to dependency change (only for local params)
+            if dependency != "__upstream__":
+                dep_widget = self.field_widgets.get(dependency)
+                if dep_widget:
+                    # Find QLineEdit in the dependency widget
+                    line_edits = dep_widget.findChildren(QLineEdit)
+                    if line_edits:
+                        le = line_edits[0]
+                        le.textChanged.connect(lambda text: self._populate_sheets(combo, text))
         
         return container
 
@@ -375,20 +394,25 @@ class NodeConfigPanel(QWidget):
         """Refresh sheet list"""
         dependency = field.get("dependency")
         if dependency:
-            file_path = self.node.get_param(dependency)
+            file_path = None
             
-            # If empty, try upstream
-            if not file_path and self.workflow:
-                upstream_path = self._find_upstream_file_path()
-                if upstream_path:
-                    file_path = upstream_path
-                    # Update the node param and the UI widget
-                    self.node.set_param(dependency, file_path)
-                    if dependency in self.field_widgets:
-                        # Find QLineEdit
-                        line_edits = self.field_widgets[dependency].findChildren(QLineEdit)
-                        if line_edits:
-                            line_edits[0].setText(file_path)
+            if dependency == "__upstream__":
+                file_path = self._find_upstream_file_path()
+            else:
+                file_path = self.node.get_param(dependency)
+                
+                # If empty, try upstream
+                if not file_path and self.workflow:
+                    upstream_path = self._find_upstream_file_path()
+                    if upstream_path:
+                        file_path = upstream_path
+                        # Update the node param and the UI widget
+                        self.node.set_param(dependency, file_path)
+                        if dependency in self.field_widgets:
+                            # Find QLineEdit
+                            line_edits = self.field_widgets[dependency].findChildren(QLineEdit)
+                            if line_edits:
+                                line_edits[0].setText(file_path)
             
             if file_path:
                 self._populate_sheets(combo, file_path)
@@ -400,28 +424,43 @@ class NodeConfigPanel(QWidget):
             
         try:
             current = combo.currentText()
+            sheets = []
             
-            # Read excel file to get sheet names
-            xl = pd.ExcelFile(file_path)
-            sheets = xl.sheet_names
+            # Handle CSV files
+            if str(file_path).lower().endswith('.csv'):
+                # CSV files don't have sheets, but we provide a default option
+                # Use the filename as the sheet name or just "Sheet1"
+                sheets = ["Sheet1"]
+            else:
+                # Read excel file to get sheet names
+                # Use openpyxl engine explicitly for xlsx
+                try:
+                    xl = pd.ExcelFile(file_path)
+                    sheets = xl.sheet_names
+                except Exception:
+                    # Fallback or retry?
+                    # If it fails, maybe it's open in another app?
+                    # But pandas usually handles read-only fine.
+                    pass
             
+            if not sheets:
+                return
+
             combo.blockSignals(True)
             combo.clear()
             combo.addItems(sheets)
             
-            if current in sheets:
+            if current:
+                # If user has typed something, keep it (allows for custom target names)
                 combo.setCurrentText(current)
             elif sheets:
+                # If nothing typed, default to first sheet
                 combo.setCurrentIndex(0)
-                # We might want to trigger a change here if the value changed
-                # But since we blocked signals, we need to do it manually if needed
-                # For now, let's just update the UI
             
             combo.blockSignals(False)
             
-            # If the previous value was invalid/empty and now we have a valid one, 
-            # we should probably update the model.
-            if current not in sheets and sheets:
+            # If we defaulted to first sheet (and nothing was there before), emit change
+            if not current and sheets:
                 combo.currentTextChanged.emit(sheets[0])
                 
         except Exception as e:
