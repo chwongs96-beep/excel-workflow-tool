@@ -6,8 +6,8 @@ from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, 
     QPushButton, QFrame, QWidget
 )
-from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QPixmap, QFont
+from PyQt6.QtCore import Qt, QUrl
+from PyQt6.QtGui import QPixmap, QFont, QDesktopServices
 
 from pathlib import Path
 
@@ -19,7 +19,7 @@ class AboutDialog(QDialog):
         super().__init__(parent)
         
         self.setWindowTitle("关于 IBCN Finance Excel 工作流工具")
-        self.setFixedSize(450, 400)
+        self.setFixedSize(450, 480)
         self.setWindowFlags(self.windowFlags() & ~Qt.WindowType.WindowContextHelpButtonHint)
         
         self._setup_ui()
@@ -91,6 +91,30 @@ class AboutDialog(QDialog):
         features_label.setStyleSheet("font-size: 11px; color: #22c55e;")
         layout.addWidget(features_label)
         
+        # Store Buttons
+        store_layout = QHBoxLayout()
+        store_layout.setSpacing(15)
+        store_layout.addStretch()
+        
+        # App Store Button
+        app_store_btn = QPushButton(" App Store")
+        app_store_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        app_store_btn.setFixedSize(140, 40)
+        app_store_btn.setObjectName("store_btn")
+        app_store_btn.clicked.connect(lambda: self._open_url("https://apps.apple.com"))
+        store_layout.addWidget(app_store_btn)
+        
+        # Google Play Button
+        play_store_btn = QPushButton("▶ Google Play")
+        play_store_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        play_store_btn.setFixedSize(140, 40)
+        play_store_btn.setObjectName("store_btn")
+        play_store_btn.clicked.connect(lambda: self._open_url("https://play.google.com"))
+        store_layout.addWidget(play_store_btn)
+        
+        store_layout.addStretch()
+        layout.addLayout(store_layout)
+        
         layout.addStretch()
         
         # Copyright
@@ -109,6 +133,10 @@ class AboutDialog(QDialog):
         btn_layout.addWidget(close_btn)
         btn_layout.addStretch()
         layout.addLayout(btn_layout)
+    
+    def _open_url(self, url):
+        """Open URL in default browser"""
+        QDesktopServices.openUrl(QUrl(url))
     
     def _apply_style(self):
         """Apply dialog styling"""
@@ -129,5 +157,15 @@ class AboutDialog(QDialog):
             }
             QPushButton:pressed {
                 background-color: #b0000e;
+            }
+            QPushButton#store_btn {
+                background-color: #000000;
+                border: 1px solid #333333;
+                font-size: 14px;
+                border-radius: 8px;
+            }
+            QPushButton#store_btn:hover {
+                background-color: #333333;
+                border: 1px solid #555555;
             }
         """)

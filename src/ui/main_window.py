@@ -25,7 +25,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from src.workflow.engine import Workflow
 from src.nodes.node_registry import NodeRegistry
-from src.nodes import excel_nodes  # Import to register nodes
+# from src.nodes import excel_nodes  # Import to register nodes
+from src.nodes import merge_nodes  # Import to register merge nodes
 from src.ui.canvas import WorkflowCanvas
 from src.ui.node_config import NodeConfigPanel
 from src.ui.data_preview import DataPreviewPanel

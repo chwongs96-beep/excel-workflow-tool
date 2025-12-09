@@ -14,6 +14,7 @@ from PyQt6.QtGui import QColor
 
 import sys
 from pathlib import Path
+import pandas as pd
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from src.nodes.base_node import BaseNode
@@ -215,6 +216,7 @@ class NodeConfigPanel(QWidget):
             
             line_edit = QLineEdit()
             line_edit.setText(str(current_value))
+            line_edit.setPlaceholderText(field.get("placeholder", ""))
             line_edit.textChanged.connect(lambda v, k=key: self._on_value_changed(k, v))
             
             browse_btn = QPushButton("...")
@@ -233,6 +235,7 @@ class NodeConfigPanel(QWidget):
             
             line_edit = QLineEdit()
             line_edit.setText(str(current_value))
+            line_edit.setPlaceholderText(field.get("placeholder", ""))
             line_edit.textChanged.connect(lambda v, k=key: self._on_value_changed(k, v))
             
             browse_btn = QPushButton("...")
@@ -244,6 +247,47 @@ class NodeConfigPanel(QWidget):
             hlayout.addWidget(line_edit)
             hlayout.addWidget(browse_btn)
         
+        elif field_type == "file_multiple":
+            widget = QWidget()
+            hlayout = QHBoxLayout(widget)
+            hlayout.setContentsMargins(0, 0, 0, 0)
+            
+            text_edit = QTextEdit()
+            text_edit.setPlainText(str(current_value))
+            text_edit.setMaximumHeight(60)
+            text_edit.textChanged.connect(lambda: self._on_value_changed(key, text_edit.toPlainText()))
+            
+            browse_btn = QPushButton("...")
+            browse_btn.setMaximumWidth(30)
+            browse_btn.clicked.connect(
+                lambda _, k=key, te=text_edit, f=field: self._browse_files(k, te, f)
+            )
+            
+            hlayout.addWidget(text_edit)
+            hlayout.addWidget(browse_btn)
+        
+        elif field_type == "directory":
+            widget = QWidget()
+            hlayout = QHBoxLayout(widget)
+            hlayout.setContentsMargins(0, 0, 0, 0)
+            
+            line_edit = QLineEdit()
+            line_edit.setText(str(current_value))
+            line_edit.setPlaceholderText(field.get("placeholder", ""))
+            line_edit.textChanged.connect(lambda v, k=key: self._on_value_changed(k, v))
+            
+            browse_btn = QPushButton("📂")
+            browse_btn.setMaximumWidth(30)
+            browse_btn.clicked.connect(
+                lambda _, k=key, le=line_edit, f=field: self._browse_directory(k, le, f)
+            )
+            
+            hlayout.addWidget(line_edit)
+            hlayout.addWidget(browse_btn)
+        
+        elif field_type == "sheet_selector":
+            widget = self._create_sheet_selector_widget(key, field, current_value)
+
         else:
             widget = QLineEdit()
             widget.setText(str(current_value))
@@ -252,6 +296,87 @@ class NodeConfigPanel(QWidget):
         self.config_layout.addRow(label_widget, widget)
         self.field_widgets[key] = widget
     
+    def _create_sheet_selector_widget(self, key: str, field: dict, current_value):
+        """Create a sheet selector widget"""
+        container = QWidget()
+        layout = QHBoxLayout(container)
+        layout.setContentsMargins(0, 0, 0, 0)
+        
+        combo = QComboBox()
+        combo.setEditable(True)
+        combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        combo.setCurrentText(str(current_value))
+        combo.currentTextChanged.connect(lambda t: self._on_value_changed(key, t))
+        
+        layout.addWidget(combo)
+        
+        refresh_btn = QPushButton("🔄")
+        refresh_btn.setToolTip("刷新工作表列表")
+        refresh_btn.setMaximumWidth(30)
+        refresh_btn.clicked.connect(lambda: self._refresh_sheets(combo, field))
+        layout.addWidget(refresh_btn)
+        
+        # Handle dependency
+        dependency = field.get("dependency")
+        if dependency:
+            # Initial population
+            file_path = self.node.get_param(dependency)
+            if file_path:
+                self._populate_sheets(combo, file_path)
+            
+            # Connect to dependency change
+            dep_widget = self.field_widgets.get(dependency)
+            if dep_widget:
+                # Find QLineEdit in the dependency widget
+                line_edits = dep_widget.findChildren(QLineEdit)
+                if line_edits:
+                    le = line_edits[0]
+                    le.textChanged.connect(lambda text: self._populate_sheets(combo, text))
+        
+        return container
+
+    def _refresh_sheets(self, combo: QComboBox, field: dict):
+        """Refresh sheet list"""
+        dependency = field.get("dependency")
+        if dependency:
+            file_path = self.node.get_param(dependency)
+            if file_path:
+                self._populate_sheets(combo, file_path)
+    
+    def _populate_sheets(self, combo: QComboBox, file_path: str):
+        """Populate combo box with sheets from Excel file"""
+        if not file_path or not Path(file_path).exists():
+            return
+            
+        try:
+            current = combo.currentText()
+            
+            # Read excel file to get sheet names
+            xl = pd.ExcelFile(file_path)
+            sheets = xl.sheet_names
+            
+            combo.blockSignals(True)
+            combo.clear()
+            combo.addItems(sheets)
+            
+            if current in sheets:
+                combo.setCurrentText(current)
+            elif sheets:
+                combo.setCurrentIndex(0)
+                # We might want to trigger a change here if the value changed
+                # But since we blocked signals, we need to do it manually if needed
+                # For now, let's just update the UI
+            
+            combo.blockSignals(False)
+            
+            # If the previous value was invalid/empty and now we have a valid one, 
+            # we should probably update the model.
+            if current not in sheets and sheets:
+                combo.currentTextChanged.emit(sheets[0])
+                
+        except Exception as e:
+            print(f"Error reading sheets: {e}")
+
     def _on_value_changed(self, key: str, value):
         """Handle value change"""
         if self.node:
@@ -271,6 +396,19 @@ class NodeConfigPanel(QWidget):
         file_path, _ = QFileDialog.getSaveFileName(self, "Save File", "", file_filter)
         if file_path:
             line_edit.setText(file_path)
+
+    def _browse_files(self, key: str, text_edit: QTextEdit, field: dict):
+        """Open file browser for multiple files"""
+        file_filter = field.get("file_filter", "All Files (*.*)")
+        file_paths, _ = QFileDialog.getOpenFileNames(self, "Select Files", "", file_filter)
+        if file_paths:
+            text_edit.setPlainText("\n".join(file_paths))
+
+    def _browse_directory(self, key: str, line_edit: QLineEdit, field: dict):
+        """Open directory browser"""
+        dir_path = QFileDialog.getExistingDirectory(self, "Select Directory", "")
+        if dir_path:
+            line_edit.setText(dir_path)
     
     def _show_help(self):
         """Show help dialog for the current node"""

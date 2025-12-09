@@ -54,10 +54,32 @@ class DataPreviewPanel(QWidget):
         
         layout.addWidget(self.table)
     
-    def set_data(self, df: pd.DataFrame):
-        """Set the DataFrame to display"""
-        self.df = df
-        self._update_table()
+    def set_data(self, data):
+        """Set the data to display"""
+        if isinstance(data, pd.DataFrame):
+            self.df = data
+            self._update_table()
+        elif isinstance(data, dict):
+            # Try to convert dict to DataFrame for preview
+            try:
+                # Handle scalar values by wrapping in list
+                processed_data = {}
+                for k, v in data.items():
+                    if hasattr(v, '__iter__') and not isinstance(v, str):
+                        processed_data[k] = v
+                    else:
+                        processed_data[k] = [v]
+                self.df = pd.DataFrame(processed_data)
+                self._update_table()
+            except Exception:
+                self.df = None
+                self.clear()
+                self.info_label.setText(f"结果: {str(data)}")
+        else:
+            # Handle other types (str, int, etc)
+            self.df = None
+            self.clear()
+            self.info_label.setText(f"结果: {str(data)}")
     
     def clear(self):
         """Clear the preview"""
@@ -69,7 +91,16 @@ class DataPreviewPanel(QWidget):
     
     def _update_table(self):
         """Update the table with DataFrame data"""
-        if self.df is None or self.df.empty:
+        if self.df is None:
+            self.clear()
+            return
+            
+        if not isinstance(self.df, pd.DataFrame):
+            self.clear()
+            self.info_label.setText(f"结果: {str(self.df)}")
+            return
+
+        if self.df.empty:
             self.clear()
             return
         
