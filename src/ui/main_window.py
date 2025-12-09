@@ -271,6 +271,7 @@ class MainWindow(QMainWindow):
         # Node config panel (right dock)
         self.config_dock = QDockWidget("节点配置", self)
         self.config_panel = NodeConfigPanel()
+        self.config_panel.set_workflow(self.workflow) # Pass workflow reference
         self.config_panel.config_changed.connect(self._on_config_changed)
         self.config_dock.setWidget(self.config_panel)
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.config_dock)
@@ -888,6 +889,7 @@ class MainWindow(QMainWindow):
         if self._confirm_discard():
             self.workflow = Workflow()
             self.canvas.set_workflow(self.workflow)
+            self.config_panel.set_workflow(self.workflow) # Update workflow ref
             self.config_panel.clear()
             self.preview_panel.clear()
             self.current_file = None
@@ -908,6 +910,7 @@ class MainWindow(QMainWindow):
             try:
                 self.workflow = Workflow.load(file_path)
                 self.canvas.set_workflow(self.workflow)
+                self.config_panel.set_workflow(self.workflow) # Update workflow ref
                 self.config_panel.clear()
                 self.preview_panel.clear()
                 self.current_file = file_path

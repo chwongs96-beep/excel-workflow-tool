@@ -29,9 +29,14 @@ class NodeConfigPanel(QWidget):
         super().__init__(parent)
         
         self.node: Optional[BaseNode] = None
+        self.workflow = None  # Reference to workflow for upstream traversal
         self.field_widgets = {}
         
         self._setup_ui()
+    
+    def set_workflow(self, workflow):
+        """Set the workflow reference"""
+        self.workflow = workflow
     
     def _setup_ui(self):
         """Set up the UI"""
@@ -147,6 +152,28 @@ class NodeConfigPanel(QWidget):
                 widget.deleteLater()
         self.field_widgets.clear()
     
+    def _find_upstream_file_path(self) -> Optional[str]:
+        """Find file path from upstream nodes"""
+        if not self.workflow or not self.node:
+            return None
+            
+        # Find upstream nodes
+        upstream_nodes = []
+        for conn in self.workflow.connections:
+            if conn.to_node == self.node.node_id:
+                if conn.from_node in self.workflow.nodes:
+                    upstream_nodes.append(self.workflow.nodes[conn.from_node])
+        
+        # Check upstream nodes for file paths
+        for up_node in upstream_nodes:
+            # Check for 'file_path' or 'base_file' or 'output_file'
+            # We check the CONFIG of the upstream node
+            for key in ['file_path', 'base_file', 'output_file']:
+                val = up_node.get_param(key)
+                if val and isinstance(val, str) and (val.lower().endswith('.xlsx') or val.lower().endswith('.xls') or val.lower().endswith('.csv')):
+                    return val
+        return None
+
     def _create_field(self, field: dict):
         """Create a config field based on schema"""
         key = field["key"]
@@ -154,6 +181,15 @@ class NodeConfigPanel(QWidget):
         field_type = field.get("type", "text")
         default = field.get("default", "")
         current_value = self.node.get_param(key, default)
+        
+        # Auto-fill file path from upstream if empty
+        if not current_value and field_type == "file" and self.workflow:
+            upstream_path = self._find_upstream_file_path()
+            if upstream_path:
+                current_value = upstream_path
+                self.node.set_param(key, current_value)
+                # We don't emit config_changed here to avoid loop/overhead during init,
+                # but the widget creation below will use the new value.
         
         # Create label
         label_widget = QLabel(label + ":")
@@ -340,6 +376,20 @@ class NodeConfigPanel(QWidget):
         dependency = field.get("dependency")
         if dependency:
             file_path = self.node.get_param(dependency)
+            
+            # If empty, try upstream
+            if not file_path and self.workflow:
+                upstream_path = self._find_upstream_file_path()
+                if upstream_path:
+                    file_path = upstream_path
+                    # Update the node param and the UI widget
+                    self.node.set_param(dependency, file_path)
+                    if dependency in self.field_widgets:
+                        # Find QLineEdit
+                        line_edits = self.field_widgets[dependency].findChildren(QLineEdit)
+                        if line_edits:
+                            line_edits[0].setText(file_path)
+            
             if file_path:
                 self._populate_sheets(combo, file_path)
     

@@ -421,6 +421,175 @@ class WorkbookAppendNode(BaseNode):
 
 
 @register_node
+class SheetCopyNode(BaseNode):
+    """Node to copy data between sheets with advanced modes"""
+    
+    node_type = "sheet_copy"
+    node_name = "复制/合并数据"
+    node_category = "灵活合并"
+    node_description = "将Excel/CSV数据复制到工作簿，支持列映射和空值检查"
+    node_color = "#f59e0b"  # Amber
+    
+    def _setup_ports(self):
+        self.add_input("workbook")
+        self.add_output("workbook")
+    
+    def get_config_ui_schema(self) -> List[Dict[str, Any]]:
+        return [
+            {
+                "key": "file_path",
+                "label": "来源文件",
+                "type": "file",
+                "file_filter": "Excel/CSV文件 (*.xlsx *.xls *.csv)",
+                "required": True,
+                "placeholder": "请选择来源文件"
+            },
+            {
+                "key": "sheet_name",
+                "label": "来源工作表 (Excel)",
+                "type": "sheet_selector",
+                "dependency": "file_path",
+                "default": "",
+                "placeholder": "CSV文件可忽略此项"
+            },
+            {
+                "key": "target_sheet",
+                "label": "目标工作表名称",
+                "type": "sheet_selector",
+                "dependency": "file_path",
+                "required": True,
+                "placeholder": "选择或输入目标工作表名称"
+            },
+            {
+                "key": "copy_mode",
+                "label": "复制模式",
+                "type": "select",
+                "options": [
+                    {"value": "whole", "label": "整页复制"},
+                    {"value": "columns", "label": "指定列到列"},
+                    {"value": "no_blank", "label": "自动检查值(无空白)"}
+                ],
+                "default": "whole"
+            },
+            {
+                "key": "column_mapping",
+                "label": "列映射 (仅指定列模式)",
+                "type": "text",
+                "placeholder": "格式: 源列A=目标列B; 源列C=目标列D"
+            },
+            {
+                "key": "write_mode",
+                "label": "写入方式",
+                "type": "select",
+                "options": [
+                    {"value": "overwrite", "label": "覆盖目标表"},
+                    {"value": "append", "label": "追加到末尾"}
+                ],
+                "default": "overwrite"
+            }
+        ]
+    
+    def validate(self) -> tuple[bool, str]:
+        if not self.get_param("file_path"):
+            return False, "来源文件是必需的"
+        if not self.get_param("target_sheet"):
+            return False, "目标工作表名称是必需的"
+        
+        mode = self.get_param("copy_mode")
+        if mode == "columns" and not self.get_param("column_mapping"):
+            return False, "指定列模式下需要填写列映射"
+            
+        return True, ""
+    
+    def execute(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
+        workbook = input_data.get("workbook")
+        if workbook is None:
+            workbook = {}
+        else:
+            workbook = workbook.copy()
+            
+        file_path = self.get_param("file_path")
+        src_sheet_name = self.get_param("sheet_name")
+        target_sheet = self.get_param("target_sheet")
+        copy_mode = self.get_param("copy_mode", "whole")
+        write_mode = self.get_param("write_mode", "overwrite")
+        col_mapping_str = self.get_param("column_mapping", "")
+        
+        # 1. Read Source Data
+        try:
+            is_csv = str(file_path).lower().endswith('.csv')
+            if is_csv:
+                try:
+                    df = pd.read_csv(file_path)
+                except UnicodeDecodeError:
+                    try:
+                        df = pd.read_csv(file_path, encoding='gbk')
+                    except UnicodeDecodeError:
+                        df = pd.read_csv(file_path, encoding='utf-8-sig')
+            else:
+                # Excel
+                if not src_sheet_name:
+                    # Default to first sheet if not specified
+                    df = pd.read_excel(file_path, sheet_name=0)
+                else:
+                    df = pd.read_excel(file_path, sheet_name=src_sheet_name)
+        except Exception as e:
+            raise ValueError(f"读取来源文件失败: {e}")
+            
+        # 2. Process Data based on Mode
+        if copy_mode == "no_blank":
+            # Remove rows where all elements are NaN
+            df = df.dropna(how='all')
+            # Also remove rows where all elements are empty strings (if any)
+            # df = df[df.astype(bool).any(axis=1)] # This might be too aggressive for 0 values
+            
+        elif copy_mode == "columns":
+            # Parse mapping: "A=B; C=D" or "Name=Name"
+            # If just "A,B,C", assume same names? Let's support "Src=Tgt"
+            mappings = [m.strip() for m in col_mapping_str.split(';') if m.strip()]
+            
+            new_df = pd.DataFrame()
+            
+            for m in mappings:
+                if '=' in m:
+                    src_col, tgt_col = m.split('=', 1)
+                    src_col = src_col.strip()
+                    tgt_col = tgt_col.strip()
+                else:
+                    # If no =, assume src = tgt
+                    src_col = m.strip()
+                    tgt_col = m.strip()
+                
+                # Check if src_col exists (by name)
+                if src_col in df.columns:
+                    new_df[tgt_col] = df[src_col]
+                else:
+                    # Try by index if integer?
+                    # For now, assume column names. 
+                    # If user inputs "A", "B", pandas uses names. 
+                    # If excel has no header, columns are 0, 1, 2...
+                    # Let's try to handle integer indices if src_col is digit
+                    if src_col.isdigit() and int(src_col) < len(df.columns):
+                         new_df[tgt_col] = df.iloc[:, int(src_col)]
+                    else:
+                        print(f"Warning: Column '{src_col}' not found in source.")
+            
+            df = new_df
+
+        # 3. Write to Target
+        if target_sheet in workbook and write_mode == "append":
+            target_df = workbook[target_sheet]
+            # Align columns if appending?
+            # pd.concat will align by columns.
+            workbook[target_sheet] = pd.concat([target_df, df], ignore_index=True)
+        else:
+            # Overwrite or Create new
+            workbook[target_sheet] = df
+            
+        return {"workbook": workbook}
+
+
+@register_node
 class WorkbookSaveNode(BaseNode):
     """Node to save the workbook"""
     
