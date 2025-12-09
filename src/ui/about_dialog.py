@@ -13,12 +13,12 @@ from pathlib import Path
 
 
 class AboutDialog(QDialog):
-    """Professional about dialog with IBCN Finance branding"""
+    """Professional about dialog with branding information"""
     
     def __init__(self, parent=None):
         super().__init__(parent)
         
-        self.setWindowTitle("关于 IBCN Finance Excel 工作流工具")
+        self.setWindowTitle("关于 Excel 工作流工具")
         self.setFixedSize(450, 480)
         self.setWindowFlags(self.windowFlags() & ~Qt.WindowType.WindowContextHelpButtonHint)
         
@@ -46,7 +46,7 @@ class AboutDialog(QDialog):
         layout.addWidget(logo_label)
         
         # App name
-        name_label = QLabel("IBCN Finance")
+        name_label = QLabel("Excel Workflow Tool")
         name_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         name_label.setStyleSheet("font-size: 24px; font-weight: bold; color: #ffffff;")
         layout.addWidget(name_label)
@@ -118,7 +118,7 @@ class AboutDialog(QDialog):
         layout.addStretch()
         
         # Copyright
-        copyright_label = QLabel("© 2025 IBCN Finance. All rights reserved.")
+        copyright_label = QLabel("© 2025 Excel Workflow Tool. All rights reserved.")
         copyright_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         copyright_label.setStyleSheet("font-size: 10px; color: #555555;")
         layout.addWidget(copyright_label)

@@ -2,7 +2,7 @@
 Excel Workflow Tool - A simple offline n8n-like tool for Excel processing
 No API, no database - just drag-and-drop Excel workflow automation
 
-IBCN Finance - Excel 工作流自动化工具
+Excel Workflow Tool - Excel 工作流自动化工具
 """
 
 import sys
@@ -23,8 +23,8 @@ def main():
     )
 
     app = QApplication(sys.argv)
-    app.setApplicationName("IBCN Finance - Excel 工作流工具")
-    app.setOrganizationName("IBCNFinance")
+    app.setApplicationName("Excel 工作流工具")
+    app.setOrganizationName("ExcelWorkflowTool")
 
     # Set style
     app.setStyle("Fusion")

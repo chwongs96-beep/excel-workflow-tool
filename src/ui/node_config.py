@@ -478,7 +478,7 @@ class NodeConfigPanel(QWidget):
 </ol>
 
 <p style="color: #90caf9; margin-top: 15px;">
-<b>IBCN Finance</b> - Excel 工作流自动化工具
+<b>Excel Workflow Tool</b> - Excel 工作流自动化工具
 </p>
 """
         

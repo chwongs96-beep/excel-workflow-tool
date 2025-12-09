@@ -293,7 +293,7 @@ class WorkflowCanvas(QWidget):
             y += grid_size
     
     def _draw_watermark(self, painter: QPainter):
-        """Draw IBCN Finance watermark with logo"""
+        """Draw watermark with logo"""
         painter.save()
         
         # Choose text color based on theme
@@ -327,7 +327,7 @@ class WorkflowCanvas(QWidget):
             
             text_x = logo_x + logo_size + 10
             text_y = logo_y + logo_size // 2 + 5
-            painter.drawText(text_x, text_y, "IBCN Finance")
+            painter.drawText(text_x, text_y, "Excel Workflow Tool")
             
             # Draw tagline below
             painter.setOpacity(0.35 if not self._is_dark_theme else 0.2)
@@ -340,7 +340,7 @@ class WorkflowCanvas(QWidget):
             font = QFont("Segoe UI", 16, QFont.Weight.Bold)
             painter.setFont(font)
             painter.setPen(QPen(text_color))
-            painter.drawText(20, self.height() - 30, "IBCN Finance")
+            painter.drawText(20, self.height() - 30, "Excel Workflow Tool")
         
         painter.restore()
     

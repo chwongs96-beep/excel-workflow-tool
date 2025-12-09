@@ -10,7 +10,7 @@ from pathlib import Path
 
 
 class SplashScreen(QWidget):
-    """Premium splash screen with IBCN Finance branding and GIF animation"""
+    """Premium splash screen with branding and GIF animation"""
     
     def __init__(self):
         super().__init__()
@@ -85,7 +85,7 @@ class SplashScreen(QWidget):
         layout.addWidget(self.gif_label, alignment=Qt.AlignmentFlag.AlignCenter)
         
         # Brand name
-        self.brand_label = QLabel("IBCN Finance")
+        self.brand_label = QLabel("Excel Workflow Tool")
         self.brand_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.brand_label.setStyleSheet("""
             QLabel {
@@ -150,7 +150,7 @@ class SplashScreen(QWidget):
         layout.addSpacing(5)
         
         # Copyright
-        self.copyright_label = QLabel("© 2025 IBCN Finance. All rights reserved.")
+        self.copyright_label = QLabel("© 2025 Excel Workflow Tool. All rights reserved.")
         self.copyright_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.copyright_label.setStyleSheet("""
             QLabel {

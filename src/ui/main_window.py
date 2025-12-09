@@ -213,7 +213,7 @@ class MainWindow(QMainWindow):
         self._has_unsaved_changes = False
         
         # Application settings
-        self._settings = QSettings("IBCN Finance", "Excel Workflow Tool")
+        self._settings = QSettings("Excel Workflow Tool", "Settings")
         
         self._setup_ui()
         self._setup_menu()
@@ -224,7 +224,7 @@ class MainWindow(QMainWindow):
         # Save initial state
         self._save_state()
         
-        self.setWindowTitle("IBCN Finance - Excel 工作流工具")
+        self.setWindowTitle("Excel 工作流工具")
         self.resize(1400, 900)
         
         # Restore saved settings (geometry, theme, etc.)
@@ -448,7 +448,7 @@ class MainWindow(QMainWindow):
         toolbar.setIconSize(QSize(24, 24))
         self.addToolBar(toolbar)
         
-        # Add IBCN Finance branding with logo
+        # Add branding with logo
         brand_widget = QWidget()
         brand_layout = QHBoxLayout(brand_widget)
         brand_layout.setContentsMargins(10, 0, 20, 0)
@@ -467,7 +467,7 @@ class MainWindow(QMainWindow):
         brand_layout.addWidget(logo_label)
         
         # Brand name (save as class attribute for theme switching)
-        self.brand_name_label = QLabel("IBCN Finance")
+        self.brand_name_label = QLabel("Excel Workflow Tool")
         self._update_brand_style(dark=True)
         brand_layout.addWidget(self.brand_name_label)
         
@@ -807,7 +807,7 @@ class MainWindow(QMainWindow):
             self.statusbar.showMessage("已切换到浅色模式")
     
     def _update_brand_style(self, dark: bool = True):
-        """Update IBCN Finance brand label style based on theme"""
+        """Update brand label style based on theme"""
         if dark:
             self.brand_name_label.setStyleSheet("""
                 QLabel {
@@ -911,7 +911,7 @@ class MainWindow(QMainWindow):
                 self.config_panel.clear()
                 self.preview_panel.clear()
                 self.current_file = file_path
-                self.setWindowTitle(f"IBCN Finance - Excel 工作流工具 - {Path(file_path).name}")
+                self.setWindowTitle(f"Excel 工作流工具 - {Path(file_path).name}")
                 self.statusbar.showMessage(f"已打开: {file_path}")
                 self._add_to_recent_files(file_path)
             except Exception as e:
@@ -939,7 +939,7 @@ class MainWindow(QMainWindow):
             try:
                 self.workflow.save(file_path)
                 self.current_file = file_path
-                self.setWindowTitle(f"IBCN Finance - Excel 工作流工具 - {Path(file_path).name}")
+                self.setWindowTitle(f"Excel 工作流工具 - {Path(file_path).name}")
                 self.statusbar.showMessage(f"已保存: {file_path}")
                 self._add_to_recent_files(file_path)
             except Exception as e:
@@ -1070,7 +1070,7 @@ class MainWindow(QMainWindow):
         return True
     
     def _setup_branding(self):
-        """Set up IBCN Finance branding elements"""
+        """Set up branding elements"""
         # Set window icon if logo exists
         logo_path = Path(__file__).parent.parent.parent / "assets" / "logo.png"
         if logo_path.exists():
@@ -1164,7 +1164,7 @@ class MainWindow(QMainWindow):
         """Update the recent files menu"""
         self.recent_menu.clear()
         
-        settings = QSettings("IBCNFinance", "ExcelWorkflowTool")
+        settings = QSettings("ExcelWorkflowTool", "Settings")
         recent_files = settings.value("recent_files", [])
         
         if not recent_files:
@@ -1188,7 +1188,7 @@ class MainWindow(QMainWindow):
     
     def _add_to_recent_files(self, file_path: str):
         """Add a file to the recent files list"""
-        settings = QSettings("IBCNFinance", "ExcelWorkflowTool")
+        settings = QSettings("ExcelWorkflowTool", "Settings")
         recent_files = settings.value("recent_files", [])
         
         # Remove if already exists
@@ -1216,7 +1216,7 @@ class MainWindow(QMainWindow):
                 self.current_file = file_path
                 self.canvas.set_workflow(self.workflow)
                 self.config_panel.clear()
-                self.setWindowTitle(f"IBCN Finance - Excel 工作流工具 - {Path(file_path).name}")
+                self.setWindowTitle(f"Excel 工作流工具 - {Path(file_path).name}")
                 self.statusbar.showMessage(f"已打开: {file_path}")
                 self._add_to_recent_files(file_path)
             except Exception as e:
@@ -1224,7 +1224,7 @@ class MainWindow(QMainWindow):
     
     def _clear_recent_files(self):
         """Clear the recent files list"""
-        settings = QSettings("IBCNFinance", "ExcelWorkflowTool")
+        settings = QSettings("ExcelWorkflowTool", "Settings")
         settings.setValue("recent_files", [])
         self._update_recent_menu()
         self.statusbar.showMessage("已清除最近文件列表")

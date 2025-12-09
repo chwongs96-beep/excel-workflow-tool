@@ -234,8 +234,8 @@ class WorkbookAppendNode(BaseNode):
                 "key": "file_path",
                 "label": "文件路径 (指定文件时)",
                 "type": "file",
-                "file_filter": "Excel文件 (*.xlsx *.xls)",
-                "placeholder": "请选择要追加的Excel文件"
+                "file_filter": "Excel/CSV文件 (*.xlsx *.xls *.csv)",
+                "placeholder": "请选择要追加的Excel或CSV文件"
             },
             {
                 "key": "folder_path",
@@ -247,7 +247,7 @@ class WorkbookAppendNode(BaseNode):
                 "key": "keyword",
                 "label": "文件名关键字 (搜索时)",
                 "type": "text",
-                "placeholder": "例如: 2023年报 (留空则匹配所有Excel)"
+                "placeholder": "例如: 2023年报 (留空则匹配所有文件)"
             },
             {
                 "key": "sheet_mode",
@@ -307,15 +307,15 @@ class WorkbookAppendNode(BaseNode):
                 raise ValueError(f"文件夹不存在: {folder}")
                 
             p = Path(folder)
-            # Find excel files
-            files = list(p.glob("*.xlsx")) + list(p.glob("*.xls"))
+            # Find excel/csv files
+            files = list(p.glob("*.xlsx")) + list(p.glob("*.xls")) + list(p.glob("*.csv"))
             
             # Filter by keyword
             if keyword:
                 files = [f for f in files if keyword in f.name]
             
             if not files:
-                raise ValueError(f"在 {folder} 中未找到匹配 '{keyword}' 的Excel文件")
+                raise ValueError(f"在 {folder} 中未找到匹配 '{keyword}' 的Excel/CSV文件")
             
             # Sort by name and take first
             files.sort(key=lambda f: f.name)
@@ -327,7 +327,39 @@ class WorkbookAppendNode(BaseNode):
         target_name = self.get_param("target_name", "")
         
         try:
-            if sheet_mode == "all":
+            is_csv = str(file_path).lower().endswith('.csv')
+            
+            if is_csv:
+                # CSV handling
+                try:
+                    # Try reading with default encoding first
+                    df = pd.read_csv(file_path)
+                except UnicodeDecodeError:
+                    try:
+                        # Try GBK (common for Chinese CSVs)
+                        df = pd.read_csv(file_path, encoding='gbk')
+                    except UnicodeDecodeError:
+                        # Try UTF-8-SIG (Excel CSV)
+                        df = pd.read_csv(file_path, encoding='utf-8-sig')
+                
+                default_name = Path(file_path).stem
+                
+                # Determine target name
+                if target_name:
+                    t_name = target_name
+                else:
+                    t_name = default_name
+                
+                # Ensure unique
+                base_t_name = t_name
+                counter = 1
+                while t_name in workbook:
+                    t_name = f"{base_t_name}_{counter}"
+                    counter += 1
+                
+                workbook[t_name] = df
+                
+            elif sheet_mode == "all":
                 dfs = pd.read_excel(file_path, sheet_name=None)
                 for name, df in dfs.items():
                     # Determine target name
