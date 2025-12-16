@@ -7,13 +7,16 @@ from typing import Any, Dict, List, Union
 from .base_node import BaseNode
 from .node_registry import register_node
 
+import shutil
+
 class StyledSheet:
     """Wrapper to hold sheet info for style-preserved copying"""
-    def __init__(self, file_path, sheet_name, df_filtered=None, header_row=0):
+    def __init__(self, file_path, sheet_name, df_filtered=None, header_row=0, is_full_copy=False):
         self.file_path = file_path
         self.sheet_name = sheet_name
         self.df_filtered = df_filtered
         self.header_row = header_row
+        self.is_full_copy = is_full_copy
 
 # ============================================================================
 # 批量合并节点 (Batch Merge)
@@ -213,7 +216,7 @@ class WorkbookCreateNode(BaseNode):
                 
                 # Wrap them in StyledSheet to preserve original styles
                 for sheet_name, df in dfs.items():
-                    workbook[sheet_name] = StyledSheet(base_file, sheet_name, df)
+                    workbook[sheet_name] = StyledSheet(base_file, sheet_name, df, is_full_copy=True)
                     
             except Exception as e:
                 raise ValueError(f"读取基础文件失败: {e}")
@@ -780,7 +783,62 @@ class WorkbookSaveNode(BaseNode):
 
     def _save_with_styles(self, output_file, workbook):
         """Save using OpenPyXL to preserve styles"""
-        # Create new workbook
+        
+        # Optimization: Check if we can use a template file (Base File)
+        # This avoids slow cell-by-cell copying for untouched sheets
+        template_file = self._find_template_file(workbook)
+        
+        if template_file:
+            try:
+                # Copy template to output
+                shutil.copy2(template_file, output_file)
+                wb = openpyxl.load_workbook(output_file)
+                
+                # Track which sheets we have handled (updated or verified as existing)
+                handled_sheets = set()
+                
+                # Update/Add sheets
+                for sheet_name, data in workbook.items():
+                    handled_sheets.add(sheet_name)
+                    
+                    # Check if this is the original sheet from template (unmodified)
+                    is_original = False
+                    if isinstance(data, StyledSheet):
+                        if (data.file_path == template_file and 
+                            data.sheet_name == sheet_name and 
+                            data.is_full_copy):
+                            is_original = True
+                    
+                    if is_original:
+                        # It's already in the file, skip writing
+                        continue
+                    
+                    # If we are here, we need to write this sheet.
+                    # If it exists in template (but we are overwriting it), remove it first.
+                    if sheet_name in wb.sheetnames:
+                        # Remove existing sheet to overwrite
+                        wb.remove(wb[sheet_name])
+                    
+                    # Create new sheet
+                    safe_name = str(sheet_name)[:31]
+                    target_ws = wb.create_sheet(title=safe_name)
+                    
+                    # Write data
+                    self._write_items_to_sheet(data, target_ws)
+                
+                # Remove sheets that are in template but not in workbook (deleted)
+                for sheet in list(wb.sheetnames):
+                    if sheet not in handled_sheets:
+                        wb.remove(wb[sheet])
+                
+                wb.save(output_file)
+                return
+                
+            except Exception as e:
+                print(f"Template optimization failed, falling back to slow copy: {e}")
+                # Fallback to standard creation if optimization fails
+        
+        # Create new workbook (Fallback or if no template)
         wb = openpyxl.Workbook()
         # Remove default sheet
         if "Sheet" in wb.sheetnames:
@@ -789,27 +847,47 @@ class WorkbookSaveNode(BaseNode):
         for sheet_name, data in workbook.items():
             safe_name = str(sheet_name)[:31]
             target_ws = wb.create_sheet(title=safe_name)
-            
-            items = data if isinstance(data, list) else [data]
-            current_row = 1
-            
-            for item in items:
-                if isinstance(item, StyledSheet):
-                    current_row = self._copy_styled_sheet(item, target_ws, current_row)
-                elif isinstance(item, pd.DataFrame):
-                    # Write dataframe values (no styles)
-                    # Write header if it's the first item
-                    if current_row == 1:
-                        for c_idx, col_name in enumerate(item.columns, 1):
-                            target_ws.cell(row=1, column=c_idx, value=col_name)
-                        current_row += 1
-                    
-                    for _, row in item.iterrows():
-                        for c_idx, value in enumerate(row, 1):
-                            target_ws.cell(row=current_row, column=c_idx, value=value)
-                        current_row += 1
+            self._write_items_to_sheet(data, target_ws)
         
         wb.save(output_file)
+
+    def _find_template_file(self, workbook):
+        """Find a potential template file (Base File) from workbook data"""
+        # We look for the most common file path among StyledSheets that are full copies
+        # Or just the first one if it covers most sheets.
+        # Simple heuristic: If there is at least one StyledSheet with is_full_copy=True,
+        # use its file path.
+        
+        for data in workbook.values():
+            if isinstance(data, StyledSheet) and data.is_full_copy:
+                if Path(data.file_path).exists():
+                    return data.file_path
+            elif isinstance(data, list) and len(data) > 0:
+                if isinstance(data[0], StyledSheet) and data[0].is_full_copy:
+                    if Path(data[0].file_path).exists():
+                        return data[0].file_path
+        return None
+
+    def _write_items_to_sheet(self, data, target_ws):
+        """Write data items (StyledSheet or DataFrame) to target worksheet"""
+        items = data if isinstance(data, list) else [data]
+        current_row = 1
+        
+        for item in items:
+            if isinstance(item, StyledSheet):
+                current_row = self._copy_styled_sheet(item, target_ws, current_row)
+            elif isinstance(item, pd.DataFrame):
+                # Write dataframe values (no styles)
+                # Write header if it's the first item
+                if current_row == 1:
+                    for c_idx, col_name in enumerate(item.columns, 1):
+                        target_ws.cell(row=1, column=c_idx, value=col_name)
+                    current_row += 1
+                
+                for _, row in item.iterrows():
+                    for c_idx, value in enumerate(row, 1):
+                        target_ws.cell(row=current_row, column=c_idx, value=value)
+                    current_row += 1
 
     def _copy_styled_sheet(self, styled: StyledSheet, target_ws, start_row):
         """Copy data and styles from StyledSheet to target worksheet"""
