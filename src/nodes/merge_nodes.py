@@ -208,7 +208,13 @@ class WorkbookCreateNode(BaseNode):
         
         if base_file and Path(base_file).exists():
             try:
-                workbook = pd.read_excel(base_file, sheet_name=None)
+                # Read all sheets as DataFrames
+                dfs = pd.read_excel(base_file, sheet_name=None)
+                
+                # Wrap them in StyledSheet to preserve original styles
+                for sheet_name, df in dfs.items():
+                    workbook[sheet_name] = StyledSheet(base_file, sheet_name, df)
+                    
             except Exception as e:
                 raise ValueError(f"读取基础文件失败: {e}")
         
@@ -685,10 +691,12 @@ class SheetCopyNode(BaseNode):
                 target_data = workbook[target_sheet]
                 # If target is StyledSheet, we can't easily append DataFrame to it without breaking style logic
                 # For now, if mixing, convert everything to DataFrame (lose styles)
-                if isinstance(target_data, StyledSheet) or (isinstance(target_data, list) and isinstance(target_data[0], StyledSheet)):
-                    # Fallback: Convert existing StyledSheets to DataFrames?
-                    # Or just warn. Let's assume user is consistent.
-                    pass
+                if isinstance(target_data, StyledSheet):
+                    target_data = target_data.df_filtered
+                elif isinstance(target_data, list) and len(target_data) > 0 and isinstance(target_data[0], StyledSheet):
+                    # Concatenate all StyledSheets DFs
+                    dfs = [s.df_filtered for s in target_data]
+                    target_data = pd.concat(dfs, ignore_index=True)
                 
                 if isinstance(target_data, pd.DataFrame):
                     workbook[target_sheet] = pd.concat([target_data, df], ignore_index=True)
