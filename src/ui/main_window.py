@@ -258,6 +258,8 @@ class MainWindow(QMainWindow):
         self.canvas.connection_created.connect(self._on_connection_created)
         self.canvas.node_delete_requested.connect(self._on_node_delete_requested)
         self.canvas.node_copy_requested.connect(self._on_node_copy_requested)
+        self.canvas.node_execution_requested.connect(self._execute_node)
+        self.canvas.workflow_execution_requested.connect(self._execute_workflow)
         self.canvas.node_dropped.connect(self._on_node_dropped)
         central_layout.addWidget(self.canvas)
         
@@ -1066,6 +1068,64 @@ class MainWindow(QMainWindow):
             self.statusbar.showMessage(f"执行失败: {e}")
             QMessageBox.critical(self, "执行错误", str(e))
     
+    def _execute_node(self, target_node_id: str):
+        """Execute the workflow up to a specific node"""
+        if not target_node_id or target_node_id not in self.workflow.nodes:
+            return
+            
+        target_node = self.workflow.nodes[target_node_id]
+        self.statusbar.showMessage(f"正在执行至节点: {target_node.node_name}...")
+        
+        # Set relevant nodes to pending
+        ancestors = self.workflow.get_ancestors(target_node_id)
+        nodes_to_reset = ancestors.union({target_node_id})
+        
+        for node_id in nodes_to_reset:
+            self.canvas.set_node_status(node_id, 'pending')
+        
+        # Start animation
+        self.canvas.start_animation()
+        QApplication.processEvents()
+        
+        try:
+            def progress(current, total, node_name, node_id=None):
+                self.statusbar.showMessage(f"正在执行: {node_name} ({current}/{total})")
+                if node_id:
+                    # Set previous running nodes to success before setting new one to running
+                    for nid in self.workflow.nodes:
+                        if self.canvas.node_status.get(nid) == 'running':
+                            self.canvas.set_node_status(nid, 'success')
+                    self.canvas.set_node_status(node_id, 'running')
+                QApplication.processEvents()
+            
+            results = self.workflow.execute_node(target_node_id, progress)
+            
+            # Update node status based on results
+            for node_id, result in results.items():
+                if result["success"]:
+                    self.canvas.set_node_status(node_id, 'success')
+                else:
+                    self.canvas.set_node_status(node_id, 'error')
+            
+            # Show results in preview panel (show output of the target node)
+            if target_node_id in results and results[target_node_id]["success"]:
+                result = results[target_node_id]
+                if result.get("output"):
+                    for port_name, data in result["output"].items():
+                        self.preview_panel.set_data(data)
+                        break # Just show the first output
+            
+            # Stop animation
+            self.canvas.stop_animation()
+            
+            self.statusbar.showMessage(f"节点执行成功: {target_node.node_name}")
+            
+        except Exception as e:
+            # Stop animation
+            self.canvas.stop_animation()
+            self.statusbar.showMessage(f"执行失败: {e}")
+            QMessageBox.critical(self, "执行错误", str(e))
+
     def _confirm_discard(self) -> bool:
         """Confirm discarding unsaved changes"""
         # For simplicity, always return True

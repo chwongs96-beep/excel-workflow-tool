@@ -131,6 +131,82 @@ class Workflow:
         
         return result
     
+    def get_ancestors(self, node_id: str) -> Set[str]:
+        """Get all ancestor nodes of a given node"""
+        ancestors = set()
+        queue = deque([node_id])
+        visited = {node_id}
+        
+        while queue:
+            current = queue.popleft()
+            for conn in self.connections:
+                if conn.to_node == current:
+                    if conn.from_node not in visited:
+                        visited.add(conn.from_node)
+                        ancestors.add(conn.from_node)
+                        queue.append(conn.from_node)
+        
+        return ancestors
+
+    def execute_node(self, target_node_id: str, progress_callback=None) -> Dict[str, Any]:
+        """Execute the workflow up to a specific node"""
+        if target_node_id not in self.nodes:
+            raise ValueError(f"Node {target_node_id} not found")
+            
+        # Get all ancestors + target node
+        nodes_to_execute = self.get_ancestors(target_node_id)
+        nodes_to_execute.add(target_node_id)
+        
+        # Get full execution order
+        full_order = self.get_execution_order()
+        
+        # Filter order to only include relevant nodes
+        execution_order = [nid for nid in full_order if nid in nodes_to_execute]
+        
+        node_outputs: Dict[str, Dict[str, Any]] = {}
+        results = {}
+        
+        total_nodes = len(execution_order)
+        
+        for i, node_id in enumerate(execution_order):
+            node = self.nodes[node_id]
+            
+            # Validate node
+            is_valid, error = node.validate()
+            if not is_valid:
+                raise ValueError(f"Node '{node.node_name}' ({node_id}): {error}")
+            
+            # Gather input data from connected nodes
+            input_data = {}
+            for conn in self.connections:
+                if conn.to_node == node_id:
+                    # Only consider connections from nodes we are executing
+                    # (Though ancestors logic ensures they are in execution_order)
+                    source_outputs = node_outputs.get(conn.from_node, {})
+                    if conn.from_port in source_outputs:
+                        input_data[conn.to_port] = source_outputs[conn.from_port]
+            
+            # Execute node
+            try:
+                output = node.execute(input_data)
+                node_outputs[node_id] = output
+                results[node_id] = {
+                    "success": True,
+                    "output": output
+                }
+            except Exception as e:
+                results[node_id] = {
+                    "success": False,
+                    "error": str(e)
+                }
+                raise RuntimeError(f"Error in node '{node.node_name}': {e}")
+            
+            # Progress callback
+            if progress_callback:
+                progress_callback(i + 1, total_nodes, node.node_name, node_id)
+        
+        return results
+
     def execute(self, progress_callback=None) -> Dict[str, Any]:
         """Execute the entire workflow"""
         execution_order = self.get_execution_order()

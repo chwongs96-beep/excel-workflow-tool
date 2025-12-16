@@ -153,7 +153,7 @@ class NodeConfigPanel(QWidget):
         self.field_widgets.clear()
     
     def _find_upstream_file_path(self) -> Optional[str]:
-        """Find file path from upstream nodes"""
+        """Find file path from upstream nodes recursively"""
         if not self.workflow or not self.node:
             return None
             
@@ -164,14 +164,63 @@ class NodeConfigPanel(QWidget):
                 if conn.from_node in self.workflow.nodes:
                     upstream_nodes.append(self.workflow.nodes[conn.from_node])
         
-        # Check upstream nodes for file paths
+        # Check each upstream branch
         for up_node in upstream_nodes:
-            # Check for 'file_path' or 'base_file' or 'output_file'
-            # We check the CONFIG of the upstream node
-            for key in ['file_path', 'base_file', 'output_file']:
-                val = up_node.get_param(key)
-                if val and isinstance(val, str) and (val.lower().endswith('.xlsx') or val.lower().endswith('.xls') or val.lower().endswith('.csv')):
-                    return val
+            path = self._get_effective_file_path(up_node, set())
+            if path:
+                return path
+        return None
+
+    def _get_effective_file_path(self, node, visited) -> Optional[str]:
+        """Get the effective file path for a node, traversing upstream if needed"""
+        if node.node_id in visited:
+            return None
+        visited.add(node.node_id)
+        
+        # 1. If it's a generator node (Merge/Read), return its file immediately
+        # This breaks the recursion and establishes a new file context
+        if node.node_type == "merge_excel_files":
+            return node.get_param("output_file") or node.get_param("base_file")
+        
+        if node.node_type == "read_excel":
+            return node.get_param("file_path")
+            
+        # 2. If it's a pass-through node (SheetCopy), try upstream first
+        if node.node_type == "sheet_copy":
+            # Check upstream
+            upstream_nodes = []
+            for conn in self.workflow.connections:
+                if conn.to_node == node.node_id:
+                    if conn.from_node in self.workflow.nodes:
+                        upstream_nodes.append(self.workflow.nodes[conn.from_node])
+            
+            for up_node in upstream_nodes:
+                path = self._get_effective_file_path(up_node, visited)
+                if path:
+                    return path
+            
+            # If no upstream path, use its own file_path (it's a root SheetCopy)
+            return node.get_param("file_path")
+            
+        # 3. Generic fallback for other nodes
+        # Try upstream first
+        upstream_nodes = []
+        for conn in self.workflow.connections:
+            if conn.to_node == node.node_id:
+                if conn.from_node in self.workflow.nodes:
+                    upstream_nodes.append(self.workflow.nodes[conn.from_node])
+        
+        for up_node in upstream_nodes:
+            path = self._get_effective_file_path(up_node, visited)
+            if path:
+                return path
+                
+        # Finally check own params
+        for key in ['file_path', 'base_file', 'output_file']:
+            val = node.get_param(key)
+            if val and isinstance(val, str) and (val.lower().endswith('.xlsx') or val.lower().endswith('.xls') or val.lower().endswith('.csv')):
+                return val
+                
         return None
 
     def _create_field(self, field: dict):

@@ -118,6 +118,11 @@ class WriteExcelNode(BaseNode):
             raise ValueError("No input data received")
         
         file_path = self.get_param("file_path")
+        
+        # Ensure file extension is .xlsx
+        if not str(file_path).lower().endswith('.xlsx'):
+            file_path = str(file_path) + '.xlsx'
+            
         sheet_name = self.get_param("sheet_name", "Sheet1")
         include_index = self.get_param("include_index", False)
         

@@ -27,6 +27,8 @@ class WorkflowCanvas(QWidget):
     connection_created = pyqtSignal()  # Emits when a connection is created
     node_delete_requested = pyqtSignal(str)  # Emits node_id for deletion
     node_copy_requested = pyqtSignal(str)  # Emits node_id for copy
+    node_execution_requested = pyqtSignal(str)  # Emits node_id for execution
+    workflow_execution_requested = pyqtSignal()  # Emits for full workflow execution
     node_dropped = pyqtSignal(str, int, int)  # Emits (node_type, x, y) when node is dropped
     
     # Node visual constants
@@ -91,7 +93,7 @@ class WorkflowCanvas(QWidget):
         self._port_border_light = "#888888"
         
         # Minimap settings
-        self._show_minimap = True
+        self._show_minimap = False
         self._minimap_size = 150
         self._minimap_margin = 10
         self._minimap_dragging = False
@@ -789,6 +791,12 @@ class WorkflowCanvas(QWidget):
                 header_action.setEnabled(False)
                 menu.addSeparator()
                 
+                # Execute Node
+                exec_action = menu.addAction("▶️ 执行节点")
+                exec_action.triggered.connect(lambda: self.node_execution_requested.emit(node_id))
+                
+                menu.addSeparator()
+                
                 # Copy node
                 copy_action = menu.addAction("📋 复制节点")
                 copy_action.triggered.connect(lambda: self.node_copy_requested.emit(node_id))
@@ -804,6 +812,11 @@ class WorkflowCanvas(QWidget):
                 help_action.triggered.connect(lambda: self.node_double_clicked.emit(node_id))
         else:
             # Canvas context menu
+            run_action = menu.addAction("▶️ 执行工作流")
+            run_action.triggered.connect(self.workflow_execution_requested.emit)
+            
+            menu.addSeparator()
+            
             zoom_in_action = menu.addAction("🔍 放大")
             zoom_in_action.triggered.connect(lambda: self.zoom(1.2))
             
