@@ -31,6 +31,7 @@ from src.ui.canvas import WorkflowCanvas
 from src.ui.node_config import NodeConfigPanel
 from src.ui.data_preview import DataPreviewPanel
 from src.ui.about_dialog import AboutDialog
+from src.ui.global_params import GlobalParamsDialog
 
 
 class NodeListItem(QListWidgetItem):
@@ -275,6 +276,7 @@ class MainWindow(QMainWindow):
         self.config_panel = NodeConfigPanel()
         self.config_panel.set_workflow(self.workflow) # Pass workflow reference
         self.config_panel.config_changed.connect(self._on_config_changed)
+        self.config_panel.execution_requested.connect(self._execute_node)
         self.config_dock.setWidget(self.config_panel)
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.config_dock)
         
@@ -357,6 +359,13 @@ class MainWindow(QMainWindow):
         
         file_menu.addSeparator()
         
+        # Global Params
+        params_action = QAction("🌐 全局参数设置...", self)
+        params_action.triggered.connect(self._show_global_params)
+        file_menu.addAction(params_action)
+        
+        file_menu.addSeparator()
+        
         # Restart app
         restart_action = QAction("重启应用(&T)", self)
         restart_action.setShortcut("Ctrl+Shift+R")
@@ -397,6 +406,12 @@ class MainWindow(QMainWindow):
         run_action.setShortcut("F6")
         run_action.triggered.connect(self._execute_workflow)
         run_menu.addAction(run_action)
+        
+        run_menu.addSeparator()
+        
+        params_run_action = QAction("🌐 全局参数设置...", self)
+        params_run_action.triggered.connect(self._show_global_params)
+        run_menu.addAction(params_run_action)
         
         # View menu
         view_menu = menubar.addMenu("视图(&V)")
@@ -1275,10 +1290,16 @@ class MainWindow(QMainWindow):
         
         if self._confirm_discard():
             try:
-                self.workflow.load(file_path)
+                # Load new workflow
+                new_workflow = Workflow.load(file_path)
+                self.workflow = new_workflow
                 self.current_file = file_path
+                
+                # Update UI components with new workflow
                 self.canvas.set_workflow(self.workflow)
+                self.config_panel.set_workflow(self.workflow) # Update config panel ref
                 self.config_panel.clear()
+                
                 self.setWindowTitle(f"Excel 工作流工具 - {Path(file_path).name}")
                 self.statusbar.showMessage(f"已打开: {file_path}")
                 self._add_to_recent_files(file_path)
@@ -1326,6 +1347,14 @@ class MainWindow(QMainWindow):
         dialog = AboutDialog(self)
         dialog.exec()
     
+    def _show_global_params(self):
+        """Show global parameters dialog"""
+        dialog = GlobalParamsDialog(self.workflow, self)
+        if dialog.exec():
+            # Update params
+            self.workflow.global_params = dialog.get_params()
+            self.statusbar.showMessage("全局参数已更新")
+            
     def _restart_app(self):
         """Restart the application"""
         reply = QMessageBox.question(

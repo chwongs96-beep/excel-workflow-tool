@@ -24,6 +24,7 @@ class NodeConfigPanel(QWidget):
     """Panel for configuring node parameters"""
     
     config_changed = pyqtSignal()
+    execution_requested = pyqtSignal(str)
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -49,6 +50,34 @@ class NodeConfigPanel(QWidget):
         self.header_label = QLabel("未选择节点")
         self.header_label.setStyleSheet("font-size: 14px; font-weight: bold; padding: 5px;")
         header_layout.addWidget(self.header_label, 1)
+        
+        # Run button
+        self.run_btn = QToolButton()
+        self.run_btn.setText("▶️")
+        self.run_btn.setToolTip("运行此节点")
+        self.run_btn.setStyleSheet("""
+            QToolButton {
+                background-color: #22c55e;
+                color: white;
+                border: none;
+                border-radius: 12px;
+                font-size: 12px;
+                font-weight: bold;
+                min-width: 24px;
+                min-height: 24px;
+                max-width: 24px;
+                max-height: 24px;
+            }
+            QToolButton:hover {
+                background-color: #4ade80;
+            }
+            QToolButton:pressed {
+                background-color: #16a34a;
+            }
+        """)
+        self.run_btn.clicked.connect(self._request_execution)
+        self.run_btn.hide()
+        header_layout.addWidget(self.run_btn)
         
         # Help button
         self.help_btn = QToolButton()
@@ -127,6 +156,7 @@ class NodeConfigPanel(QWidget):
         self.desc_label.setText(node.node_description)
         self.placeholder.hide()
         self.help_btn.show()  # Show help button when node is selected
+        self.run_btn.show()   # Show run button
         
         # Create config fields
         schema = node.get_config_ui_schema()
@@ -142,6 +172,7 @@ class NodeConfigPanel(QWidget):
         self.desc_label.setText("")
         self.placeholder.show()
         self.help_btn.hide()  # Hide help button when no node selected
+        self.run_btn.hide()   # Hide run button
     
     def _clear_config_fields(self):
         """Clear all config fields"""
@@ -547,7 +578,13 @@ class NodeConfigPanel(QWidget):
         dir_path = QFileDialog.getExistingDirectory(self, "Select Directory", "")
         if dir_path:
             line_edit.setText(dir_path)
+            self._on_value_changed(key, dir_path)
     
+    def _request_execution(self):
+        """Request execution of the current node"""
+        if self.node:
+            self.execution_requested.emit(self.node.node_id)
+
     def _show_help(self):
         """Show help dialog for the current node"""
         if not self.node:

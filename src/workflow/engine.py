@@ -45,6 +45,7 @@ class Workflow:
         self.name = name
         self.nodes: Dict[str, BaseNode] = {}
         self.connections: List[Connection] = []
+        self.global_params: Dict[str, str] = {}  # Global parameters for substitution
         self._node_counter = 0
     
     def generate_node_id(self) -> str:
@@ -171,6 +172,9 @@ class Workflow:
         for i, node_id in enumerate(execution_order):
             node = self.nodes[node_id]
             
+            # Inject global params as context
+            node.set_context(self.global_params)
+            
             # Validate node
             is_valid, error = node.validate()
             if not is_valid:
@@ -218,6 +222,9 @@ class Workflow:
         for i, node_id in enumerate(execution_order):
             node = self.nodes[node_id]
             
+            # Inject global params as context
+            node.set_context(self.global_params)
+            
             # Validate node
             is_valid, error = node.validate()
             if not is_valid:
@@ -257,6 +264,7 @@ class Workflow:
         return {
             "name": self.name,
             "node_counter": self._node_counter,
+            "global_params": self.global_params,
             "nodes": {
                 node_id: node.to_dict() 
                 for node_id, node in self.nodes.items()
@@ -277,6 +285,7 @@ class Workflow:
         
         workflow = cls(data.get("name", "Untitled"))
         workflow._node_counter = data.get("node_counter", 0)
+        workflow.global_params = data.get("global_params", {})
         
         # Recreate nodes
         for node_id, node_data in data.get("nodes", {}).items():

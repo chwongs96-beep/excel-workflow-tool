@@ -227,6 +227,7 @@ class WorkbookAppendNode(BaseNode):
     
     def _setup_ports(self):
         self.add_input("workbook")
+        self.add_input("file_path")  # Optional input for dynamic source file
         self.add_output("workbook")
     
     def get_config_ui_schema(self) -> List[Dict[str, Any]]:
@@ -246,7 +247,7 @@ class WorkbookAppendNode(BaseNode):
                 "label": "文件路径 (指定文件时)",
                 "type": "file",
                 "file_filter": "Excel/CSV文件 (*.xlsx *.xls *.csv)",
-                "placeholder": "请选择要追加的Excel或CSV文件"
+                "placeholder": "请选择要追加的Excel或CSV文件 (或连接输入节点)"
             },
             {
                 "key": "folder_path",
@@ -289,10 +290,8 @@ class WorkbookAppendNode(BaseNode):
     
     def validate(self) -> tuple[bool, str]:
         source_type = self.get_param("source_type", "file")
-        if source_type == "file":
-            if not self.get_param("file_path"):
-                return False, "来源文件是必需的"
-        else:
+        # Relax validation to allow dynamic input via connection
+        if source_type == "search":
             if not self.get_param("folder_path"):
                 return False, "搜索文件夹是必需的"
         return True, ""
@@ -308,10 +307,13 @@ class WorkbookAppendNode(BaseNode):
         source_type = self.get_param("source_type", "file")
         file_path = ""
         
-        if source_type == "file":
+        # Check input port first for dynamic file path
+        if "file_path" in input_data and input_data["file_path"]:
+            file_path = input_data["file_path"]
+        elif source_type == "file":
             file_path = self.get_param("file_path")
         else:
-            folder = self.get_param("folder_path")
+            folder_path = self.get_param("folder_path")
             keyword = self.get_param("keyword", "")
             
             if not folder or not Path(folder).exists():
@@ -443,6 +445,7 @@ class SheetCopyNode(BaseNode):
     
     def _setup_ports(self):
         self.add_input("workbook")
+        self.add_input("file_path")  # Optional input for dynamic source file
         self.add_output("workbook")
     
     def get_config_ui_schema(self) -> List[Dict[str, Any]]:
@@ -453,7 +456,7 @@ class SheetCopyNode(BaseNode):
                 "type": "file",
                 "file_filter": "Excel/CSV文件 (*.xlsx *.xls *.csv)",
                 "required": True,
-                "placeholder": "请选择来源文件"
+                "placeholder": "请选择来源文件 (或连接输入节点)"
             },
             {
                 "key": "sheet_name",
@@ -532,8 +535,9 @@ class SheetCopyNode(BaseNode):
         ]
     
     def validate(self) -> tuple[bool, str]:
-        if not self.get_param("file_path"):
-            return False, "来源文件是必需的"
+        # Relax validation to allow dynamic input via connection
+        # if not self.get_param("file_path"):
+        #     return False, "来源文件是必需的"
         if not self.get_param("target_sheet"):
             return False, "目标工作表名称是必需的"
         
@@ -550,7 +554,12 @@ class SheetCopyNode(BaseNode):
         else:
             workbook = workbook.copy()
             
-        file_path = self.get_param("file_path")
+        # Check input port first for dynamic file path
+        if "file_path" in input_data and input_data["file_path"]:
+            file_path = input_data["file_path"]
+        else:
+            file_path = self.get_param("file_path")
+            
         src_sheet_name = self.get_param("sheet_name")
         target_sheet = self.get_param("target_sheet")
         copy_mode = self.get_param("copy_mode", "whole")
@@ -803,18 +812,16 @@ class WorkbookSaveNode(BaseNode):
             else:
                 src_ws = src_wb.active
                 
-            # Determine which rows/cols to copy based on df_filtered
-            # df_filtered has the data we want to keep.
-            # We need to map df rows back to excel rows.
-            
             df = styled.df_filtered
             header_row_idx = styled.header_row + 1 # 1-based
             
-            # 1. Copy Header (if start_row is 1, or if we want to repeat headers?)
-            # Usually only copy header for the first block
+            # Check if data is sequential (unfiltered)
+            # If index is RangeIndex(0, N, 1), it means no rows were dropped/reordered
+            is_sequential = isinstance(df.index, pd.RangeIndex) and df.index.step == 1 and df.index.start == 0
+            
+            # 1. Copy Header
             if start_row == 1:
                 # Copy header row from source
-                # Assuming header is at header_row_idx
                 for col in range(1, src_ws.max_column + 1):
                     src_cell = src_ws.cell(row=header_row_idx, column=col)
                     tgt_cell = target_ws.cell(row=start_row, column=col)
@@ -831,66 +838,44 @@ class WorkbookSaveNode(BaseNode):
                 # Copy column dimensions
                 for col_letter, dim in src_ws.column_dimensions.items():
                     target_ws.column_dimensions[col_letter] = copy_obj(dim)
-                    
+                
+                # Copy merged cells in header area
+                for range_ in src_ws.merged_cells.ranges:
+                    if range_.max_row <= header_row_idx:
+                        # Shift to target header row (start_row)
+                        # Source header is at header_row_idx
+                        # Target header is at start_row
+                        offset = start_row - header_row_idx
+                        
+                        # We need to shift the range
+                        min_row = range_.min_row + offset
+                        max_row = range_.max_row + offset
+                        target_ws.merge_cells(start_row=min_row, start_column=range_.min_col,
+                                            end_row=max_row, end_column=range_.max_col)
+                                            
                 start_row += 1
             
             # 2. Copy Data Rows
-            # We iterate through the DataFrame to know what to write (values)
-            # And we try to map back to source row for styles.
-            # Mapping: df.index (if not reset) corresponds to original row offset from header
-            
-            # Note: If df was filtered, index might be non-sequential (e.g. 0, 2, 5)
-            # Excel Row = header_row_idx + 1 + index
-            
             for idx, row_data in df.iterrows():
-                # Calculate source row index (1-based)
-                # This assumes the index is the original integer index from read_excel
-                # If read_excel used a different index, this might break.
-                # But standard read_excel(header=X) produces RangeIndex 0..N
-                
                 if isinstance(idx, int):
                     src_row_idx = header_row_idx + 1 + idx
                 else:
-                    # Fallback if index is not int (e.g. set_index was used)
-                    # We lose style mapping capability for specific rows
-                    # Just use default style or try to guess?
-                    # For now, assume sequential scan if index is lost?
-                    # Or just don't copy style for this row.
                     src_row_idx = None
                 
-                # Write columns
-                # We iterate columns in the dataframe.
-                # We need to map dataframe column index to Excel column index.
-                # df.columns are names.
-                
                 for col_pos, (col_name, value) in enumerate(row_data.items()):
-                    # col_pos is 0-based index of column in dataframe
-                    # Excel col = col_pos + 1 (assuming df cols match excel cols order)
-                    # If "Columns" mode was used, df has fewer columns.
-                    # We need to find which column in Excel corresponds to this df column.
-                    
-                    # This is tricky. 
-                    # Simplified approach: Assume df columns are in same order as Excel columns 
-                    # but maybe some are missing.
-                    # Or, try to find column by header name in source?
-                    
                     tgt_col_idx = col_pos + 1
                     
                     # Try to find source cell for style
                     src_cell = None
                     if src_row_idx:
-                        # Find column index in source that matches this column name?
-                        # This is slow.
-                        # Optimization: Pre-calculate column mapping
-                        # For now, let's assume 1:1 mapping if copy_mode="whole"
-                        # If copy_mode="columns", we might have reordered.
-                        
-                        # Let's just use the same column index for now
-                        # (This works perfectly for "Whole" mode)
-                        src_cell = src_ws.cell(row=src_row_idx, column=tgt_col_idx)
+                        # Assuming 1:1 column mapping for simplicity in style copying
+                        # If columns were reordered, this might pick wrong style source column
+                        # But usually acceptable for "Whole" copy mode
+                        if tgt_col_idx <= src_ws.max_column:
+                            src_cell = src_ws.cell(row=src_row_idx, column=tgt_col_idx)
                     
                     tgt_cell = target_ws.cell(row=start_row, column=tgt_col_idx)
-                    tgt_cell.value = value # Use value from DF (cleaned)
+                    tgt_cell.value = value
                     
                     if src_cell and src_cell.has_style:
                         tgt_cell.font = copy_obj(src_cell.font)
@@ -900,15 +885,51 @@ class WorkbookSaveNode(BaseNode):
                         tgt_cell.protection = copy_obj(src_cell.protection)
                         tgt_cell.alignment = copy_obj(src_cell.alignment)
                 
-                # Copy row dimensions (height)
+                # Copy row dimensions
                 if src_row_idx and src_row_idx in src_ws.row_dimensions:
                     target_ws.row_dimensions[start_row] = copy_obj(src_ws.row_dimensions[src_row_idx])
                 
                 start_row += 1
+            
+            # 3. Copy Merged Cells in Data Area (Only if sequential/unfiltered)
+            if is_sequential:
+                # Calculate offset between source data start and target data start
+                # Source data starts at: header_row_idx + 1
+                # Target data started at: (original start_row passed to func) + 1 (if header copied)
+                # Current start_row is at the end.
                 
+                # Let's recalculate target data start row
+                # If we copied header, target data started at (original_start_row + 1)
+                # If we didn't, target data started at original_start_row
+                
+                # We can just iterate ranges and check if they are in data area
+                for range_ in src_ws.merged_cells.ranges:
+                    if range_.min_row > header_row_idx:
+                        # This is a data area merge
+                        
+                        # Calculate offset
+                        # Source row R maps to Target row R'
+                        # R' = R - (header_row_idx + 1) + target_data_start_row
+                        
+                        # Wait, simpler:
+                        # We know we wrote `len(df)` rows.
+                        # The data block in source is `header_row_idx + 1` to `header_row_idx + len(df)`
+                        # The data block in target is `target_data_start` to `target_data_start + len(df) - 1`
+                        
+                        # Let's find target_data_start
+                        # It is `start_row - len(df)` (since start_row was incremented in loop)
+                        target_data_start = start_row - len(df)
+                        
+                        offset = target_data_start - (header_row_idx + 1)
+                        
+                        min_row = range_.min_row + offset
+                        max_row = range_.max_row + offset
+                        
+                        target_ws.merge_cells(start_row=min_row, start_column=range_.min_col,
+                                            end_row=max_row, end_column=range_.max_col)
+
             return start_row
             
         except Exception as e:
             print(f"Error copying styles: {e}")
-            # Fallback?
             return start_row

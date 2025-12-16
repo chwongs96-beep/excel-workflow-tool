@@ -45,10 +45,15 @@ class BaseNode:
         self.config = NodeConfig()
         self.position = (0, 0)
         self._output_data: Dict[str, Any] = {}
+        self._context: Dict[str, Any] = {}  # Execution context (e.g. global params)
         
         # Initialize ports
         self._setup_ports()
     
+    def set_context(self, context: Dict[str, Any]):
+        """Set execution context"""
+        self._context = context
+
     def _setup_ports(self):
         """Override in subclasses to set up input/output ports"""
         pass
@@ -80,8 +85,22 @@ class BaseNode:
         self.config.params[key] = value
     
     def get_param(self, key: str, default: Any = None) -> Any:
-        """Get a configuration parameter"""
-        return self.config.params.get(key, default)
+        """Get a configuration parameter with variable substitution"""
+        val = self.config.params.get(key, default)
+        
+        # Perform substitution if value is string and context is available
+        if isinstance(val, str) and self._context:
+            try:
+                # Simple substitution for {var}
+                # We iterate over context keys to replace
+                for k, v in self._context.items():
+                    placeholder = "{" + k + "}"
+                    if placeholder in val:
+                        val = val.replace(placeholder, str(v))
+            except Exception:
+                pass # Ignore substitution errors
+                
+        return val
     
     def execute(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
         """
