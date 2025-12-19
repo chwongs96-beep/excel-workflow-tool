@@ -602,13 +602,22 @@ class SheetCopyNode(BaseNode):
         except Exception as e:
             raise ValueError(f"读取来源文件失败: {e}")
             
-        # 2. Pre-process Data (Cleaning & Filtering)
-        
-        # Strip whitespace from string columns
-        if strip_whitespace:
-            df = df.apply(lambda x: x.str.strip() if x.dtype == "object" else x)
-            # Also strip column names if they are strings
-            df.columns = df.columns.map(lambda x: x.strip() if isinstance(x, str) else x)
+        # Check row count limit
+        if len(df) > 20000:
+            print(f"Skipping file {file_path} because it has {len(df)} rows (limit 20000)")
+            return {"workbook": workbook}
+
+        try:
+            # 2. Pre-process Data (Cleaning & Filtering)
+            
+            # Strip whitespace from string columns
+            if strip_whitespace:
+            try:
+                df = df.apply(lambda x: x.str.strip() if x.dtype == "object" else x)
+                # Also strip column names if they are strings
+                df.columns = df.columns.map(lambda x: x.strip() if isinstance(x, str) else x)
+            except Exception as e:
+                raise ValueError(f"去除空格失败: {e}")
             
         # Filter rows
         if filter_query:
@@ -621,96 +630,98 @@ class SheetCopyNode(BaseNode):
         
         # Remove duplicates
         if remove_duplicates:
-            df = df.drop_duplicates()
-
-        # 3. Process Data based on Mode
-        if copy_mode == "no_blank":
-            # Remove rows where all elements are NaN
-            df = df.dropna(how='all')
-            # Also remove rows where all elements are empty strings (if any)
-            # df = df[df.astype(bool).any(axis=1)] # This might be too aggressive for 0 values
-            
-        elif copy_mode == "columns":
-            # Parse mapping: "A=B; C=D" or "Name=Name"
-            # If just "A,B,C", assume same names? Let's support "Src=Tgt"
-            mappings = [m.strip() for m in col_mapping_str.split(';') if m.strip()]
-            
-            new_df = pd.DataFrame()
-            
-            for m in mappings:
-                if '=' in m:
-                    src_col, tgt_col = m.split('=', 1)
-                    src_col = src_col.strip()
-                    tgt_col = tgt_col.strip()
-                else:
-                    # If no =, assume src = tgt
-                    src_col = m.strip()
-                    tgt_col = m.strip()
+            try:
+                df = df.drop_duplicates()
+            except Exception as e:
+                raise ValueError(f"去除重复行失败: {e}")
+                df = df.dropna(how='all')
+                # Also remove rows where all elements are empty strings (if any)
+                # df = df[df.astype(bool).any(axis=1)] # This might be too aggressive for 0 values
                 
-                # Check if src_col exists (by name)
-                if src_col in df.columns:
-                    new_df[tgt_col] = df[src_col]
-                else:
-                    # Try by index if integer?
-                    # For now, assume column names. 
-                    # If user inputs "A", "B", pandas uses names. 
-                    # If excel has no header, columns are 0, 1, 2...
-                    # Let's try to handle integer indices if src_col is digit
-                    if src_col.isdigit() and int(src_col) < len(df.columns):
-                         new_df[tgt_col] = df.iloc[:, int(src_col)]
+            elif copy_mode == "columns":
+                # Parse mapping: "A=B; C=D" or "Name=Name"
+                # If just "A,B,C", assume same names? Let's support "Src=Tgt"
+                mappings = [m.strip() for m in col_mapping_str.split(';') if m.strip()]
+                
+                new_df = pd.DataFrame()
+                
+                for m in mappings:
+                    if '=' in m:
+                        src_col, tgt_col = m.split('=', 1)
+                        src_col = src_col.strip()
+                        tgt_col = tgt_col.strip()
                     else:
-                        print(f"Warning: Column '{src_col}' not found in source.")
-            
-            df = new_df
-
-        # 4. Write to Target
-        if preserve_formatting and not is_csv:
-            # Use StyledSheet wrapper
-            # We pass the processed dataframe so we know what data to write (cleaned/filtered)
-            # But we also pass file path to read styles from
-            
-            # If appending, we need to handle that in WorkbookSaveNode or here?
-            # WorkbookSaveNode handles the final write.
-            # If we have multiple StyledSheets for the same target sheet (append), 
-            # we might need a list of them.
-            
-            if target_sheet in workbook:
-                existing = workbook[target_sheet]
-                if isinstance(existing, list):
-                    existing.append(StyledSheet(file_path, src_sheet_name, df, header_row))
-                else:
-                    # Convert to list if appending
-                    if write_mode == "append":
-                        workbook[target_sheet] = [existing, StyledSheet(file_path, src_sheet_name, df, header_row)]
+                        # If no =, assume src = tgt
+                        src_col = m.strip()
+                        tgt_col = m.strip()
+                    
+                    # Check if src_col exists (by name)
+                    if src_col in df.columns:
+                        new_df[tgt_col] = df[src_col]
                     else:
-                        # Overwrite
-                        workbook[target_sheet] = StyledSheet(file_path, src_sheet_name, df, header_row)
-            else:
-                workbook[target_sheet] = StyledSheet(file_path, src_sheet_name, df, header_row)
+                        # Try by index if integer?
+                        # For now, assume column names. 
+                        # If user inputs "A", "B", pandas uses names. 
+                        # If excel has no header, columns are 0, 1, 2...
+                        # Let's try to handle integer indices if src_col is digit
+                        if src_col.isdigit() and int(src_col) < len(df.columns):
+                            new_df[tgt_col] = df.iloc[:, int(src_col)]
+                        else:
+                            print(f"Warning: Column '{src_col}' not found in source.")
                 
-        else:
-            # Standard DataFrame mode
-            if target_sheet in workbook and write_mode == "append":
-                target_data = workbook[target_sheet]
-                # If target is StyledSheet, we can't easily append DataFrame to it without breaking style logic
-                # For now, if mixing, convert everything to DataFrame (lose styles)
-                if isinstance(target_data, StyledSheet):
-                    target_data = target_data.df_filtered
-                elif isinstance(target_data, list) and len(target_data) > 0 and isinstance(target_data[0], StyledSheet):
-                    # Concatenate all StyledSheets DFs
-                    dfs = [s.df_filtered for s in target_data]
-                    target_data = pd.concat(dfs, ignore_index=True)
+                df = new_df
+
+            # 4. Write to Target
+            if preserve_formatting and not is_csv:
+                # Use StyledSheet wrapper
+                # We pass the processed dataframe so we know what data to write (cleaned/filtered)
+                # But we also pass file path to read styles from
                 
-                if isinstance(target_data, pd.DataFrame):
-                    workbook[target_sheet] = pd.concat([target_data, df], ignore_index=True)
-                elif isinstance(target_data, list):
-                     # Append to list of StyledSheets? No, this branch is for DataFrame
-                     # If we are here, preserve_formatting is False.
-                     # So we should probably convert everything to DF.
-                     pass
+                # If appending, we need to handle that in WorkbookSaveNode or here?
+                # WorkbookSaveNode handles the final write.
+                # If we have multiple StyledSheets for the same target sheet (append), 
+                # we might need a list of them.
+                
+                if target_sheet in workbook:
+                    existing = workbook[target_sheet]
+                    if isinstance(existing, list):
+                        existing.append(StyledSheet(file_path, src_sheet_name, df, header_row))
+                    else:
+                        # Convert to list if appending
+                        if write_mode == "append":
+                            workbook[target_sheet] = [existing, StyledSheet(file_path, src_sheet_name, df, header_row)]
+                        else:
+                            # Overwrite
+                            workbook[target_sheet] = StyledSheet(file_path, src_sheet_name, df, header_row)
+                else:
+                    workbook[target_sheet] = StyledSheet(file_path, src_sheet_name, df, header_row)
+                    
             else:
-                # Overwrite or Create new
-                workbook[target_sheet] = df
+                # Standard DataFrame mode
+                if target_sheet in workbook and write_mode == "append":
+                    target_data = workbook[target_sheet]
+                    # If target is StyledSheet, we can't easily append DataFrame to it without breaking style logic
+                    # For now, if mixing, convert everything to DataFrame (lose styles)
+                    if isinstance(target_data, StyledSheet):
+                        target_data = target_data.df_filtered
+                    elif isinstance(target_data, list) and len(target_data) > 0 and isinstance(target_data[0], StyledSheet):
+                        # Concatenate all StyledSheets DFs
+                        dfs = [s.df_filtered for s in target_data]
+                        target_data = pd.concat(dfs, ignore_index=True)
+                    
+                    if isinstance(target_data, pd.DataFrame):
+                        workbook[target_sheet] = pd.concat([target_data, df], ignore_index=True)
+                    elif isinstance(target_data, list):
+                        # Append to list of StyledSheets? No, this branch is for DataFrame
+                        # If we are here, preserve_formatting is False.
+                        # So we should probably convert everything to DF.
+                        pass
+                else:
+                    # Overwrite or Create new
+                    workbook[target_sheet] = df
+        
+        except Exception as e:
+            raise ValueError(f"处理文件失败 [{file_path}]: {e}")
             
         return {"workbook": workbook}
 
@@ -878,16 +889,26 @@ class WorkbookSaveNode(BaseNode):
                 current_row = self._copy_styled_sheet(item, target_ws, current_row)
             elif isinstance(item, pd.DataFrame):
                 # Write dataframe values (no styles)
+                # Optimization: Use append() for much faster writing
+                
                 # Write header if it's the first item
                 if current_row == 1:
-                    for c_idx, col_name in enumerate(item.columns, 1):
-                        target_ws.cell(row=1, column=c_idx, value=col_name)
+                    target_ws.append(list(item.columns))
                     current_row += 1
                 
-                for _, row in item.iterrows():
-                    for c_idx, value in enumerate(row, 1):
-                        target_ws.cell(row=current_row, column=c_idx, value=value)
-                    current_row += 1
+                # Convert to list of lists for faster iteration
+                # Using itertuples is faster than iterrows
+                try:
+                    for row_idx, row in enumerate(item.itertuples(index=False), 1):
+                        try:
+                            target_ws.append(list(row))
+                            current_row += 1
+                        except Exception as e:
+                            raise ValueError(f"写入数据失败，位置: 第 {row_idx} 行. 错误: {e}")
+                except Exception as e:
+                    if "写入数据失败" in str(e):
+                        raise e
+                    raise ValueError(f"处理数据失败: {e}")
 
     def _copy_styled_sheet(self, styled: StyledSheet, target_ws, start_row):
         """Copy data and styles from StyledSheet to target worksheet"""
@@ -943,39 +964,42 @@ class WorkbookSaveNode(BaseNode):
             
             # 2. Copy Data Rows
             for idx, row_data in df.iterrows():
-                if isinstance(idx, int):
-                    src_row_idx = header_row_idx + 1 + idx
-                else:
-                    src_row_idx = None
-                
-                for col_pos, (col_name, value) in enumerate(row_data.items()):
-                    tgt_col_idx = col_pos + 1
+                try:
+                    if isinstance(idx, int):
+                        src_row_idx = header_row_idx + 1 + idx
+                    else:
+                        src_row_idx = None
                     
-                    # Try to find source cell for style
-                    src_cell = None
-                    if src_row_idx:
-                        # Assuming 1:1 column mapping for simplicity in style copying
-                        # If columns were reordered, this might pick wrong style source column
-                        # But usually acceptable for "Whole" copy mode
-                        if tgt_col_idx <= src_ws.max_column:
-                            src_cell = src_ws.cell(row=src_row_idx, column=tgt_col_idx)
+                    for col_pos, (col_name, value) in enumerate(row_data.items()):
+                        tgt_col_idx = col_pos + 1
+                        
+                        # Try to find source cell for style
+                        src_cell = None
+                        if src_row_idx:
+                            # Assuming 1:1 column mapping for simplicity in style copying
+                            # If columns were reordered, this might pick wrong style source column
+                            # But usually acceptable for "Whole" copy mode
+                            if tgt_col_idx <= src_ws.max_column:
+                                src_cell = src_ws.cell(row=src_row_idx, column=tgt_col_idx)
+                        
+                        tgt_cell = target_ws.cell(row=start_row, column=tgt_col_idx)
+                        tgt_cell.value = value
+                        
+                        if src_cell and src_cell.has_style:
+                            tgt_cell.font = copy_obj(src_cell.font)
+                            tgt_cell.border = copy_obj(src_cell.border)
+                            tgt_cell.fill = copy_obj(src_cell.fill)
+                            tgt_cell.number_format = copy_obj(src_cell.number_format)
+                            tgt_cell.protection = copy_obj(src_cell.protection)
+                            tgt_cell.alignment = copy_obj(src_cell.alignment)
                     
-                    tgt_cell = target_ws.cell(row=start_row, column=tgt_col_idx)
-                    tgt_cell.value = value
+                    # Copy row dimensions
+                    if src_row_idx and src_row_idx in src_ws.row_dimensions:
+                        target_ws.row_dimensions[start_row] = copy_obj(src_ws.row_dimensions[src_row_idx])
                     
-                    if src_cell and src_cell.has_style:
-                        tgt_cell.font = copy_obj(src_cell.font)
-                        tgt_cell.border = copy_obj(src_cell.border)
-                        tgt_cell.fill = copy_obj(src_cell.fill)
-                        tgt_cell.number_format = copy_obj(src_cell.number_format)
-                        tgt_cell.protection = copy_obj(src_cell.protection)
-                        tgt_cell.alignment = copy_obj(src_cell.alignment)
-                
-                # Copy row dimensions
-                if src_row_idx and src_row_idx in src_ws.row_dimensions:
-                    target_ws.row_dimensions[start_row] = copy_obj(src_ws.row_dimensions[src_row_idx])
-                
-                start_row += 1
+                    start_row += 1
+                except Exception as e:
+                    raise ValueError(f"复制带格式数据失败，位置: 第 {idx} 行 (源文件行号: {src_row_idx if src_row_idx else '未知'}). 错误: {e}")
             
             # 3. Copy Merged Cells in Data Area (Only if sequential/unfiltered)
             if is_sequential:
