@@ -602,45 +602,34 @@ class SheetCopyNode(BaseNode):
         except Exception as e:
             raise ValueError(f"读取来源文件失败: {e}")
             
-        # Check row count limit
-        if len(df) > 20000:
-            print(f"Skipping file {file_path} because it has {len(df)} rows (limit 20000)")
-            return {"workbook": workbook}
-
+        # 2. Pre-process Data (Cleaning & Filtering)
         try:
-            # 2. Pre-process Data (Cleaning & Filtering)
-            
             # Strip whitespace from string columns
             if strip_whitespace:
-            try:
                 df = df.apply(lambda x: x.str.strip() if x.dtype == "object" else x)
                 # Also strip column names if they are strings
                 df.columns = df.columns.map(lambda x: x.strip() if isinstance(x, str) else x)
-            except Exception as e:
-                raise ValueError(f"去除空格失败: {e}")
+                
+            # Filter rows
+            if filter_query:
+                try:
+                    # Support simple syntax like: 状态 == '完成'
+                    # Pandas query uses the dataframe's columns
+                    df = df.query(filter_query)
+                except Exception as e:
+                    raise ValueError(f"行过滤条件错误: {e}")
             
-        # Filter rows
-        if filter_query:
-            try:
-                # Support simple syntax like: 状态 == '完成'
-                # Pandas query uses the dataframe's columns
-                df = df.query(filter_query)
-            except Exception as e:
-                raise ValueError(f"行过滤条件错误: {e}")
-        
-        # Remove duplicates
-        if remove_duplicates:
-            try:
+            # Remove duplicates
+            if remove_duplicates:
                 df = df.drop_duplicates()
-            except Exception as e:
-                raise ValueError(f"去除重复行失败: {e}")
+
+            # 3. Process Data based on Mode
+            if copy_mode == "no_blank":
+                # Remove rows where all elements are NaN
                 df = df.dropna(how='all')
-                # Also remove rows where all elements are empty strings (if any)
-                # df = df[df.astype(bool).any(axis=1)] # This might be too aggressive for 0 values
                 
             elif copy_mode == "columns":
                 # Parse mapping: "A=B; C=D" or "Name=Name"
-                # If just "A,B,C", assume same names? Let's support "Src=Tgt"
                 mappings = [m.strip() for m in col_mapping_str.split(';') if m.strip()]
                 
                 new_df = pd.DataFrame()
@@ -660,10 +649,6 @@ class SheetCopyNode(BaseNode):
                         new_df[tgt_col] = df[src_col]
                     else:
                         # Try by index if integer?
-                        # For now, assume column names. 
-                        # If user inputs "A", "B", pandas uses names. 
-                        # If excel has no header, columns are 0, 1, 2...
-                        # Let's try to handle integer indices if src_col is digit
                         if src_col.isdigit() and int(src_col) < len(df.columns):
                             new_df[tgt_col] = df.iloc[:, int(src_col)]
                         else:
@@ -674,14 +659,6 @@ class SheetCopyNode(BaseNode):
             # 4. Write to Target
             if preserve_formatting and not is_csv:
                 # Use StyledSheet wrapper
-                # We pass the processed dataframe so we know what data to write (cleaned/filtered)
-                # But we also pass file path to read styles from
-                
-                # If appending, we need to handle that in WorkbookSaveNode or here?
-                # WorkbookSaveNode handles the final write.
-                # If we have multiple StyledSheets for the same target sheet (append), 
-                # we might need a list of them.
-                
                 if target_sheet in workbook:
                     existing = workbook[target_sheet]
                     if isinstance(existing, list):
@@ -711,11 +688,6 @@ class SheetCopyNode(BaseNode):
                     
                     if isinstance(target_data, pd.DataFrame):
                         workbook[target_sheet] = pd.concat([target_data, df], ignore_index=True)
-                    elif isinstance(target_data, list):
-                        # Append to list of StyledSheets? No, this branch is for DataFrame
-                        # If we are here, preserve_formatting is False.
-                        # So we should probably convert everything to DF.
-                        pass
                 else:
                     # Overwrite or Create new
                     workbook[target_sheet] = df
