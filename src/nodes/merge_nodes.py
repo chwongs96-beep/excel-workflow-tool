@@ -1007,11 +1007,14 @@ class WorkbookSaveNode(BaseNode):
                         min_row = range_.min_row + offset
                         max_row = range_.max_row + offset
                         
-                        target_ws.merge_cells(start_row=min_row, start_column=range_.min_col,
-                                            end_row=max_row, end_column=range_.max_col)
+                        try:
+                            target_ws.merge_cells(start_row=min_row, start_column=range_.min_col,
+                                                end_row=max_row, end_column=range_.max_col)
+                        except Exception as e:
+                            print(f"Warning: Failed to merge cells {range_}: {e}")
 
             return start_row
             
         except Exception as e:
-            print(f"Error copying styles: {e}")
-            return start_row
+            # If style copy fails, raise error so user knows
+            raise ValueError(f"复制样式失败: {e}")
