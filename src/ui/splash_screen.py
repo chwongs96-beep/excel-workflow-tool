@@ -7,6 +7,7 @@ from PyQt6.QtCore import Qt, QTimer, QSize
 from PyQt6.QtGui import QPixmap, QPainter, QColor, QFont, QMovie, QPainterPath, QBrush, QPen
 
 from pathlib import Path
+from src.utils import get_resource_path
 
 
 class SplashScreen(QWidget):
@@ -53,7 +54,7 @@ class SplashScreen(QWidget):
         self.gif_label.setStyleSheet("background: transparent;")
         
         # Try to load splash image (GIF or PNG)
-        assets_path = Path(__file__).parent.parent.parent / "assets"
+        assets_path = get_resource_path("assets")
         gif_path = assets_path / "splash.gif"
         png_path = assets_path / "splash.png"
         

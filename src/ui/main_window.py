@@ -32,6 +32,7 @@ from src.ui.node_config import NodeConfigPanel
 from src.ui.data_preview import DataPreviewPanel
 from src.ui.about_dialog import AboutDialog
 from src.ui.global_params import GlobalParamsDialog
+from src.utils import get_resource_path
 
 
 class NodeListItem(QListWidgetItem):
@@ -474,7 +475,7 @@ class MainWindow(QMainWindow):
         
         # Logo
         logo_label = QLabel()
-        logo_path = Path(__file__).parent.parent.parent / "assets" / "logo.png"
+        logo_path = get_resource_path("assets/logo.png")
         if logo_path.exists():
             pixmap = QPixmap(str(logo_path))
             scaled_pixmap = pixmap.scaled(32, 32, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
@@ -1150,7 +1151,7 @@ class MainWindow(QMainWindow):
     def _setup_branding(self):
         """Set up branding elements"""
         # Set window icon if logo exists
-        logo_path = Path(__file__).parent.parent.parent / "assets" / "logo.png"
+        logo_path = get_resource_path("assets/logo.png")
         if logo_path.exists():
             self.setWindowIcon(QIcon(str(logo_path)))
     
