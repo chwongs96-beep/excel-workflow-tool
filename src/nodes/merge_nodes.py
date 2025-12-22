@@ -658,20 +658,28 @@ class SheetCopyNode(BaseNode):
 
             # 4. Write to Target
             if preserve_formatting and not is_csv:
+                # Check if this is a full copy (optimization)
+                is_full_copy = (
+                    copy_mode == "whole" and 
+                    not filter_query and 
+                    not remove_duplicates and 
+                    not strip_whitespace
+                )
+                
                 # Use StyledSheet wrapper
                 if target_sheet in workbook:
                     existing = workbook[target_sheet]
                     if isinstance(existing, list):
-                        existing.append(StyledSheet(file_path, src_sheet_name, df, header_row))
+                        existing.append(StyledSheet(file_path, src_sheet_name, df, header_row, is_full_copy=is_full_copy))
                     else:
                         # Convert to list if appending
                         if write_mode == "append":
-                            workbook[target_sheet] = [existing, StyledSheet(file_path, src_sheet_name, df, header_row)]
+                            workbook[target_sheet] = [existing, StyledSheet(file_path, src_sheet_name, df, header_row, is_full_copy=is_full_copy)]
                         else:
                             # Overwrite
-                            workbook[target_sheet] = StyledSheet(file_path, src_sheet_name, df, header_row)
+                            workbook[target_sheet] = StyledSheet(file_path, src_sheet_name, df, header_row, is_full_copy=is_full_copy)
                 else:
-                    workbook[target_sheet] = StyledSheet(file_path, src_sheet_name, df, header_row)
+                    workbook[target_sheet] = StyledSheet(file_path, src_sheet_name, df, header_row, is_full_copy=is_full_copy)
                     
             else:
                 # Standard DataFrame mode
@@ -749,10 +757,14 @@ class WorkbookSaveNode(BaseNode):
                 has_styles = True
                 break
         
-        if has_styles:
-            self._save_with_styles(output_file, workbook)
-        else:
-            self._save_standard(output_file, workbook)
+        self._source_wb_cache = {} # Initialize cache
+        try:
+            if has_styles:
+                self._save_with_styles(output_file, workbook)
+            else:
+                self._save_standard(output_file, workbook)
+        finally:
+            self._source_wb_cache = {} # Clear cache
                 
         return {"file_path": output_file}
 
@@ -885,7 +897,32 @@ class WorkbookSaveNode(BaseNode):
     def _copy_styled_sheet(self, styled: StyledSheet, target_ws, start_row):
         """Copy data and styles from StyledSheet to target worksheet"""
         try:
-            src_wb = openpyxl.load_workbook(styled.file_path, data_only=False)
+            # Check for .xls file (not supported by openpyxl)
+            if str(styled.file_path).lower().endswith('.xls'):
+                print(f"Warning: .xls format does not support style preservation. Copying data only for {styled.file_path}")
+                # Fallback to fast data writing
+                df = styled.df_filtered
+                
+                # Write header if needed
+                if start_row == 1:
+                    target_ws.append(list(df.columns))
+                    start_row += 1
+                
+                # Write data
+                for row in df.itertuples(index=False):
+                    target_ws.append(list(row))
+                    start_row += 1
+                    
+                return start_row
+
+            # Use cached workbook if available
+            if styled.file_path in self._source_wb_cache:
+                src_wb = self._source_wb_cache[styled.file_path]
+            else:
+                print(f"Loading source workbook for styles: {styled.file_path}")
+                src_wb = openpyxl.load_workbook(styled.file_path, data_only=False)
+                self._source_wb_cache[styled.file_path] = src_wb
+
             if styled.sheet_name and styled.sheet_name in src_wb.sheetnames:
                 src_ws = src_wb[styled.sheet_name]
             else:
@@ -935,7 +972,12 @@ class WorkbookSaveNode(BaseNode):
                 start_row += 1
             
             # 2. Copy Data Rows
+            total_rows = len(df)
             for idx, row_data in df.iterrows():
+                # Progress logging for large files
+                if idx % 1000 == 0:
+                    print(f"Processing row {idx}/{total_rows}...")
+                    
                 try:
                     if isinstance(idx, int):
                         src_row_idx = header_row_idx + 1 + idx
