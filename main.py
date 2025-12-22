@@ -31,6 +31,22 @@ except ImportError as e:
         raise e
 
 def main():
+    # Enable High DPI scaling
+    QApplication.setHighDpiScaleFactorRoundingPolicy(
+        Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
+    )
+
+    app = QApplication(sys.argv)
+    app.setApplicationName("Excel 工作流工具")
+    app.setOrganizationName("ExcelWorkflowTool")
+
+    # Set style
+    app.setStyle("Fusion")
+    
+    # Show splash screen and load main window
+    window = show_splash_and_load(app, MainWindow)
+    
+    sys.exit(app.exec())
 
 
 if __name__ == "__main__":

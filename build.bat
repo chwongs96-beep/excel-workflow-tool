@@ -1,6 +1,8 @@
 @echo off
+set PYTHON_EXE="C:\Users\CheChe\AppData\Local\Programs\Python\Python313\python.exe"
+
 echo Installing build dependencies...
-pip install pyinstaller
+%PYTHON_EXE% -m pip install pyinstaller
 
 echo.
 echo Building Excel Workflow Tool...
@@ -9,7 +11,7 @@ echo This may take a few minutes.
 if exist dist rmdir /s /q dist
 if exist build rmdir /s /q build
 
-pyinstaller main.py ^
+%PYTHON_EXE% -m PyInstaller main.py ^
     --name "ExcelWorkflowTool" ^
     --windowed ^
     --onefile ^
@@ -24,4 +26,3 @@ if exist "dist\ExcelWorkflowTool.exe" (
 ) else (
     echo Build failed. Please check the error messages above.
 )
-pause
