@@ -832,6 +832,8 @@ class WorkbookSaveNode(BaseNode):
             except Exception as e:
                 print(f"Template optimization failed, falling back to slow copy: {e}")
                 # Fallback to standard creation if optimization fails
+                # CRITICAL: Reset template_file to None so we don't skip 'original' sheets
+                template_file = None
         
         # Create new workbook (Fallback or if no template)
         wb = openpyxl.Workbook()
@@ -855,11 +857,11 @@ class WorkbookSaveNode(BaseNode):
         
         for data in workbook.values():
             if isinstance(data, StyledSheet) and data.is_full_copy:
-                if Path(data.file_path).exists():
+                if Path(data.file_path).exists() and not str(data.file_path).lower().endswith('.xls'):
                     return data.file_path
             elif isinstance(data, list) and len(data) > 0:
                 if isinstance(data[0], StyledSheet) and data[0].is_full_copy:
-                    if Path(data[0].file_path).exists():
+                    if Path(data[0].file_path).exists() and not str(data[0].file_path).lower().endswith('.xls'):
                         return data[0].file_path
         return None
 
