@@ -1,13 +1,30 @@
 import pandas as pd
 import openpyxl
 from openpyxl.utils import get_column_letter
+from openpyxl.cell.cell import ILLEGAL_CHARACTERS_RE
 from copy import copy as copy_obj
 from pathlib import Path
 from typing import Any, Dict, List, Union
 from .base_node import BaseNode
 from .node_registry import register_node
+import re
 
 import shutil
+
+def sanitize_sheet_name(name):
+    """Sanitize sheet name to be compatible with Excel"""
+    name = str(name)
+    invalid_chars = ['\\', '/', '?', '*', ':', '[', ']']
+    for char in invalid_chars:
+        name = name.replace(char, '_')
+    return name[:31]
+
+def sanitize_value(value):
+    """Remove illegal characters from string values"""
+    if isinstance(value, str):
+        # Use openpyxl's regex for illegal characters
+        return ILLEGAL_CHARACTERS_RE.sub('', value)
+    return value
 
 class StyledSheet:
     """Wrapper to hold sheet info for style-preserved copying"""
@@ -773,7 +790,9 @@ class WorkbookSaveNode(BaseNode):
         with pd.ExcelWriter(output_file, engine='openpyxl') as writer:
             for sheet_name, df in workbook.items():
                 if isinstance(df, pd.DataFrame):
-                    safe_name = str(sheet_name)[:31]
+                    safe_name = sanitize_sheet_name(sheet_name)
+                    # Optional: Sanitize dataframe content if needed, but might be slow
+                    # df = df.applymap(sanitize_value) 
                     df.to_excel(writer, sheet_name=safe_name, index=False)
 
     def _save_with_styles(self, output_file, workbook):
@@ -815,7 +834,7 @@ class WorkbookSaveNode(BaseNode):
                         wb.remove(wb[sheet_name])
                     
                     # Create new sheet
-                    safe_name = str(sheet_name)[:31]
+                    safe_name = sanitize_sheet_name(sheet_name)
                     target_ws = wb.create_sheet(title=safe_name)
                     
                     # Write data
@@ -842,7 +861,7 @@ class WorkbookSaveNode(BaseNode):
             wb.remove(wb["Sheet"])
             
         for sheet_name, data in workbook.items():
-            safe_name = str(sheet_name)[:31]
+            safe_name = sanitize_sheet_name(sheet_name)
             target_ws = wb.create_sheet(title=safe_name)
             self._write_items_to_sheet(data, target_ws)
         
@@ -879,7 +898,9 @@ class WorkbookSaveNode(BaseNode):
                 
                 # Write header if it's the first item
                 if current_row == 1:
-                    target_ws.append(list(item.columns))
+                    # Sanitize header columns
+                    headers = [sanitize_value(str(col)) for col in item.columns]
+                    target_ws.append(headers)
                     current_row += 1
                 
                 # Convert to list of lists for faster iteration
@@ -891,7 +912,9 @@ class WorkbookSaveNode(BaseNode):
                             self.report_progress(f"写入行 {row_idx}/{total_rows}")
                             
                         try:
-                            target_ws.append(list(row))
+                            # Sanitize row values
+                            sanitized_row = [sanitize_value(val) for val in row]
+                            target_ws.append(sanitized_row)
                             current_row += 1
                         except Exception as e:
                             raise ValueError(f"写入数据失败，位置: 第 {row_idx} 行. 错误: {e}")
@@ -911,12 +934,14 @@ class WorkbookSaveNode(BaseNode):
                 
                 # Write header if needed
                 if start_row == 1:
-                    target_ws.append(list(df.columns))
+                    headers = [sanitize_value(str(col)) for col in df.columns]
+                    target_ws.append(headers)
                     start_row += 1
                 
                 # Write data
                 for row in df.itertuples(index=False):
-                    target_ws.append(list(row))
+                    sanitized_row = [sanitize_value(val) for val in row]
+                    target_ws.append(sanitized_row)
                     start_row += 1
                     
                 return start_row
@@ -948,7 +973,7 @@ class WorkbookSaveNode(BaseNode):
                     src_cell = src_ws.cell(row=header_row_idx, column=col)
                     tgt_cell = target_ws.cell(row=start_row, column=col)
                     
-                    tgt_cell.value = src_cell.value
+                    tgt_cell.value = sanitize_value(src_cell.value)
                     if src_cell.has_style:
                         tgt_cell.font = copy_obj(src_cell.font)
                         tgt_cell.border = copy_obj(src_cell.border)
@@ -1004,7 +1029,7 @@ class WorkbookSaveNode(BaseNode):
                                 src_cell = src_ws.cell(row=src_row_idx, column=tgt_col_idx)
                         
                         tgt_cell = target_ws.cell(row=start_row, column=tgt_col_idx)
-                        tgt_cell.value = value
+                        tgt_cell.value = sanitize_value(value)
                         
                         if src_cell and src_cell.has_style:
                             tgt_cell.font = copy_obj(src_cell.font)
