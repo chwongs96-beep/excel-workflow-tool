@@ -46,6 +46,7 @@ class BaseNode:
         self.position = (0, 0)
         self._output_data: Dict[str, Any] = {}
         self._context: Dict[str, Any] = {}  # Execution context (e.g. global params)
+        self._progress_callback = None # Callback for reporting internal progress
         
         # Initialize ports
         self._setup_ports()
@@ -53,6 +54,15 @@ class BaseNode:
     def set_context(self, context: Dict[str, Any]):
         """Set execution context"""
         self._context = context
+
+    def set_progress_callback(self, callback):
+        """Set callback for reporting internal progress"""
+        self._progress_callback = callback
+        
+    def report_progress(self, message: str):
+        """Report progress if callback is set"""
+        if self._progress_callback:
+            self._progress_callback(message)
 
     def _setup_ports(self):
         """Override in subclasses to set up input/output ports"""

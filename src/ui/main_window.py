@@ -1042,8 +1042,12 @@ class MainWindow(QMainWindow):
         QApplication.processEvents()
         
         try:
-            def progress(current, total, node_name, node_id=None):
-                self.statusbar.showMessage(f"正在执行: {node_name} ({current}/{total})")
+            def progress(current, total, node_name, node_id=None, detail_msg=None):
+                msg = f"正在执行: {node_name} ({current}/{total})"
+                if detail_msg:
+                    msg += f" - {detail_msg}"
+                self.statusbar.showMessage(msg)
+                
                 if node_id:
                     # Set previous running nodes to success before setting new one to running
                     for nid in self.workflow.nodes:

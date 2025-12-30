@@ -175,6 +175,15 @@ class Workflow:
             # Inject global params as context
             node.set_context(self.global_params)
             
+            # Inject progress callback
+            if progress_callback:
+                def node_progress_wrapper(msg):
+                    try:
+                        progress_callback(i + 1, total_nodes, node.node_name, node_id, msg)
+                    except TypeError:
+                        progress_callback(i + 1, total_nodes, f"{node.node_name} - {msg}", node_id)
+                node.set_progress_callback(node_progress_wrapper)
+            
             # Validate node
             is_valid, error = node.validate()
             if not is_valid:
@@ -224,6 +233,15 @@ class Workflow:
             
             # Inject global params as context
             node.set_context(self.global_params)
+            
+            # Inject progress callback
+            if progress_callback:
+                def node_progress_wrapper(msg):
+                    try:
+                        progress_callback(i + 1, total_nodes, node.node_name, node_id, msg)
+                    except TypeError:
+                        progress_callback(i + 1, total_nodes, f"{node.node_name} - {msg}", node_id)
+                node.set_progress_callback(node_progress_wrapper)
             
             # Validate node
             is_valid, error = node.validate()

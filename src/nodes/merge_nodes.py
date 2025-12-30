@@ -883,7 +883,11 @@ class WorkbookSaveNode(BaseNode):
                 # Convert to list of lists for faster iteration
                 # Using itertuples is faster than iterrows
                 try:
+                    total_rows = len(item)
                     for row_idx, row in enumerate(item.itertuples(index=False), 1):
+                        if row_idx % 1000 == 0:
+                            self.report_progress(f"写入行 {row_idx}/{total_rows}")
+                            
                         try:
                             target_ws.append(list(row))
                             current_row += 1
@@ -975,7 +979,8 @@ class WorkbookSaveNode(BaseNode):
             total_rows = len(df)
             for idx, row_data in df.iterrows():
                 # Progress logging for large files
-                if idx % 1000 == 0:
+                if idx % 100 == 0:
+                    self.report_progress(f"处理行 {idx}/{total_rows}")
                     print(f"Processing row {idx}/{total_rows}...")
                     
                 try:
