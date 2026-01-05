@@ -372,14 +372,15 @@ class WorkbookAppendNode(BaseNode):
                 # CSV handling
                 try:
                     # Try reading with default encoding first
-                    df = pd.read_csv(file_path)
+                    # Use engine='python' and sep=None to auto-detect delimiter
+                    df = pd.read_csv(file_path, sep=None, engine='python')
                 except UnicodeDecodeError:
                     try:
                         # Try GBK (common for Chinese CSVs)
-                        df = pd.read_csv(file_path, encoding='gbk')
+                        df = pd.read_csv(file_path, encoding='gbk', sep=None, engine='python')
                     except UnicodeDecodeError:
                         # Try UTF-8-SIG (Excel CSV)
-                        df = pd.read_csv(file_path, encoding='utf-8-sig')
+                        df = pd.read_csv(file_path, encoding='utf-8-sig', sep=None, engine='python')
                 
                 default_name = Path(file_path).stem
                 
@@ -607,12 +608,13 @@ class SheetCopyNode(BaseNode):
             is_csv = str(file_path).lower().endswith('.csv')
             if is_csv:
                 try:
-                    df = pd.read_csv(file_path, header=header_row)
+                    # Use engine='python' and sep=None to auto-detect delimiter
+                    df = pd.read_csv(file_path, header=header_row, sep=None, engine='python')
                 except UnicodeDecodeError:
                     try:
-                        df = pd.read_csv(file_path, encoding='gbk', header=header_row)
+                        df = pd.read_csv(file_path, encoding='gbk', header=header_row, sep=None, engine='python')
                     except UnicodeDecodeError:
-                        df = pd.read_csv(file_path, encoding='utf-8-sig', header=header_row)
+                        df = pd.read_csv(file_path, encoding='utf-8-sig', header=header_row, sep=None, engine='python')
             else:
                 # Excel
                 if not src_sheet_name:
