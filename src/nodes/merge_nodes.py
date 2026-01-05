@@ -35,6 +35,35 @@ class StyledSheet:
         self.header_row = header_row
         self.is_full_copy = is_full_copy
 
+def read_csv_with_options(file_path, encoding_opt='auto', delimiter_opt='auto', header_row=0):
+    """Helper to read CSV with flexible options"""
+    
+    # Determine delimiter
+    sep = None # Auto-detect
+    if delimiter_opt == 'comma': sep = ','
+    elif delimiter_opt == 'tab': sep = '\t'
+    elif delimiter_opt == 'semicolon': sep = ';'
+    elif delimiter_opt == 'pipe': sep = '|'
+    elif delimiter_opt == 'space': sep = ' '
+    
+    # Determine encoding list
+    encodings = []
+    if encoding_opt and encoding_opt != 'auto':
+        encodings = [encoding_opt]
+    else:
+        encodings = ['utf-8', 'gbk', 'utf-8-sig', 'gb18030', 'latin1']
+        
+    last_error = None
+    for enc in encodings:
+        try:
+            # Use engine='python' for better delimiter detection and regex separators
+            return pd.read_csv(file_path, sep=sep, encoding=enc, header=header_row, engine='python')
+        except Exception as e:
+            last_error = e
+            continue
+            
+    raise ValueError(f"无法读取CSV文件 (尝试了编码: {encodings}): {last_error}")
+
 # ============================================================================
 # 批量合并节点 (Batch Merge)
 # ============================================================================
@@ -311,6 +340,39 @@ class WorkbookAppendNode(BaseNode):
                 "type": "text",
                 "default": "",
                 "placeholder": "留空则自动命名 (文件名/原名)"
+            },
+            {
+                "key": "csv_delimiter",
+                "label": "CSV分隔符 (仅CSV)",
+                "type": "select",
+                "options": [
+                    {"value": "auto", "label": "自动检测"},
+                    {"value": "comma", "label": "逗号 (,)"},
+                    {"value": "tab", "label": "制表符 (Tab)"},
+                    {"value": "semicolon", "label": "分号 (;)"},
+                    {"value": "pipe", "label": "竖线 (|)"},
+                    {"value": "space", "label": "空格"}
+                ],
+                "default": "auto"
+            },
+            {
+                "key": "csv_encoding",
+                "label": "CSV编码 (仅CSV)",
+                "type": "select",
+                "options": [
+                    {"value": "auto", "label": "自动检测"},
+                    {"value": "utf-8", "label": "UTF-8"},
+                    {"value": "gbk", "label": "GBK/GB18030"},
+                    {"value": "utf-8-sig", "label": "UTF-8-SIG"}
+                ],
+                "default": "auto"
+            },
+            {
+                "key": "header_row",
+                "label": "标题所在行 (仅CSV, 从0开始)",
+                "type": "number",
+                "default": 0,
+                "min": 0
             }
         ]
     
@@ -365,22 +427,16 @@ class WorkbookAppendNode(BaseNode):
         src_sheet_name = self.get_param("sheet_name", "")
         target_name = self.get_param("target_name", "")
         
+        csv_delimiter = self.get_param("csv_delimiter", "auto")
+        csv_encoding = self.get_param("csv_encoding", "auto")
+        header_row = self.get_param("header_row", 0)
+        
         try:
             is_csv = str(file_path).lower().endswith('.csv')
             
             if is_csv:
                 # CSV handling
-                try:
-                    # Try reading with default encoding first
-                    # Use engine='python' and sep=None to auto-detect delimiter
-                    df = pd.read_csv(file_path, sep=None, engine='python')
-                except UnicodeDecodeError:
-                    try:
-                        # Try GBK (common for Chinese CSVs)
-                        df = pd.read_csv(file_path, encoding='gbk', sep=None, engine='python')
-                    except UnicodeDecodeError:
-                        # Try UTF-8-SIG (Excel CSV)
-                        df = pd.read_csv(file_path, encoding='utf-8-sig', sep=None, engine='python')
+                df = read_csv_with_options(file_path, csv_encoding, csv_delimiter, header_row)
                 
                 default_name = Path(file_path).stem
                 
@@ -498,6 +554,32 @@ class SheetCopyNode(BaseNode):
                 "placeholder": "CSV文件可忽略此项"
             },
             {
+                "key": "csv_delimiter",
+                "label": "CSV分隔符 (仅CSV)",
+                "type": "select",
+                "options": [
+                    {"value": "auto", "label": "自动检测"},
+                    {"value": "comma", "label": "逗号 (,)"},
+                    {"value": "tab", "label": "制表符 (Tab)"},
+                    {"value": "semicolon", "label": "分号 (;)"},
+                    {"value": "pipe", "label": "竖线 (|)"},
+                    {"value": "space", "label": "空格"}
+                ],
+                "default": "auto"
+            },
+            {
+                "key": "csv_encoding",
+                "label": "CSV编码 (仅CSV)",
+                "type": "select",
+                "options": [
+                    {"value": "auto", "label": "自动检测"},
+                    {"value": "utf-8", "label": "UTF-8"},
+                    {"value": "gbk", "label": "GBK/GB18030"},
+                    {"value": "utf-8-sig", "label": "UTF-8-SIG"}
+                ],
+                "default": "auto"
+            },
+            {
                 "key": "header_row",
                 "label": "标题所在行 (从0开始)",
                 "type": "number",
@@ -603,18 +685,14 @@ class SheetCopyNode(BaseNode):
         strip_whitespace = self.get_param("strip_whitespace", True)
         preserve_formatting = self.get_param("preserve_formatting", True)
         
+        csv_delimiter = self.get_param("csv_delimiter", "auto")
+        csv_encoding = self.get_param("csv_encoding", "auto")
+        
         # 1. Read Source Data
         try:
             is_csv = str(file_path).lower().endswith('.csv')
             if is_csv:
-                try:
-                    # Use engine='python' and sep=None to auto-detect delimiter
-                    df = pd.read_csv(file_path, header=header_row, sep=None, engine='python')
-                except UnicodeDecodeError:
-                    try:
-                        df = pd.read_csv(file_path, encoding='gbk', header=header_row, sep=None, engine='python')
-                    except UnicodeDecodeError:
-                        df = pd.read_csv(file_path, encoding='utf-8-sig', header=header_row, sep=None, engine='python')
+                df = read_csv_with_options(file_path, csv_encoding, csv_delimiter, header_row)
             else:
                 # Excel
                 if not src_sheet_name:
