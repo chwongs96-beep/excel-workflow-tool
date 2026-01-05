@@ -991,9 +991,56 @@ class WorkbookSaveNode(BaseNode):
                         tgt_cell.protection = copy_obj(src_cell.protection)
                         tgt_cell.alignment = copy_obj(src_cell.alignment)
 
-            # 0. Pre-Header Rows (Only for full copy)
-            if styled.is_full_copy and header_row_idx > 1:
-                for r in range(1, header_row_idx):
+            # =================================================================
+            # STRATEGY A: Full Copy (Direct OpenPyXL Copy)
+            # =================================================================
+            # If this is a full copy of an Excel file, we should bypass DataFrame iteration
+            # to ensure we capture ALL rows (including blank ones) and ALL columns.
+            # This fixes issues where Pandas skips blank rows or fails to parse some columns.
+            if styled.is_full_copy and not str(styled.file_path).lower().endswith('.csv'):
+                print(f"Using Direct Full Copy Strategy for {styled.sheet_name}")
+                
+                # 1. Copy Header & Pre-Header Rows
+                # Actually, for full copy, we just copy from row 1 to max_row
+                # But we need to respect start_row offset in target
+                
+                # Calculate offset
+                # Source Row 1 -> Target Row start_row
+                offset = start_row - 1
+                
+                total_rows = src_ws.max_row
+                for r in range(1, total_rows + 1):
+                    if r % 1000 == 0:
+                        self.report_progress(f"复制行 {r}/{total_rows}")
+                    
+                    copy_src_row(r, start_row)
+                    start_row += 1
+                
+                # Copy column dimensions
+                for col_letter, dim in src_ws.column_dimensions.items():
+                    target_ws.column_dimensions[col_letter] = copy_obj(dim)
+                
+                # Copy merged cells
+                for range_ in src_ws.merged_cells.ranges:
+                    min_row = range_.min_row + offset
+                    max_row = range_.max_row + offset
+                    try:
+                        target_ws.merge_cells(start_row=min_row, start_column=range_.min_col,
+                                            end_row=max_row, end_column=range_.max_col)
+                    except Exception as e:
+                        print(f"Warning: Failed to merge cells {range_}: {e}")
+                        
+                return start_row
+
+            # =================================================================
+            # STRATEGY B: DataFrame Iteration (Filtered/CSV/Partial)
+            # =================================================================
+            
+            # 0. Pre-Header Rows (Only for full copy - but we handled full copy above for Excel)
+            # If it's CSV full copy, we don't have pre-header rows in DF usually (unless skipped)
+            # So this block is mostly legacy or for edge cases where is_full_copy is True but we fell through
+            if styled.is_full_copy and header_row_idx > 1 and not str(styled.file_path).lower().endswith('.csv'):
+                 for r in range(1, header_row_idx):
                     copy_src_row(r, start_row)
                     start_row += 1
 
@@ -1087,7 +1134,7 @@ class WorkbookSaveNode(BaseNode):
             
             # 3. Post-Data Rows (Only for full copy)
             # This handles empty rows at the end that Pandas skipped but have formatting
-            if styled.is_full_copy and last_src_row < src_ws.max_row:
+            if styled.is_full_copy and last_src_row < src_ws.max_row and not str(styled.file_path).lower().endswith('.csv'):
                 print(f"Copying trailing empty rows from {last_src_row + 1} to {src_ws.max_row}")
                 for r in range(last_src_row + 1, src_ws.max_row + 1):
                     copy_src_row(r, start_row)
