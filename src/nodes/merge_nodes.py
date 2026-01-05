@@ -342,10 +342,10 @@ class WorkbookAppendNode(BaseNode):
             folder_path = self.get_param("folder_path")
             keyword = self.get_param("keyword", "")
             
-            if not folder or not Path(folder).exists():
-                raise ValueError(f"文件夹不存在: {folder}")
+            if not folder_path or not Path(folder_path).exists():
+                raise ValueError(f"文件夹不存在: {folder_path}")
                 
-            p = Path(folder)
+            p = Path(folder_path)
             # Find excel/csv files
             files = list(p.glob("*.xlsx")) + list(p.glob("*.xls")) + list(p.glob("*.csv"))
             
@@ -354,7 +354,7 @@ class WorkbookAppendNode(BaseNode):
                 files = [f for f in files if keyword in f.name]
             
             if not files:
-                raise ValueError(f"在 {folder} 中未找到匹配 '{keyword}' 的Excel/CSV文件")
+                raise ValueError(f"在 {folder_path} 中未找到匹配 '{keyword}' 的Excel/CSV文件")
             
             # Sort by name and take first
             files.sort(key=lambda f: f.name)
@@ -422,21 +422,24 @@ class WorkbookAppendNode(BaseNode):
                         t_name = f"{base_t_name}_{counter}"
                         counter += 1
                         
-                    workbook[t_name] = df
+                    # Wrap in StyledSheet for style preservation
+                    workbook[t_name] = StyledSheet(file_path, name, df, is_full_copy=True)
                     
             else:
                 # Single sheet
+                actual_sheet_name = src_sheet_name
                 if sheet_mode == "first":
+                    # We need to find the name of the first sheet for StyledSheet
+                    xl = pd.ExcelFile(file_path)
+                    actual_sheet_name = xl.sheet_names[0]
                     df = pd.read_excel(file_path, sheet_name=0)
-                    # Try to get actual name? pd.read_excel(sheet_name=0) returns dataframe, not dict
-                    # To get name, we need to load workbook object or read_excel(sheet_name=None) and take first key
-                    # Optimization: just read first sheet
                     default_name = Path(file_path).stem # Use filename as default sheet name
                 else: # name
                     if not src_sheet_name:
                         raise ValueError("未指定源工作表名称")
                     df = pd.read_excel(file_path, sheet_name=src_sheet_name)
                     default_name = src_sheet_name
+                    actual_sheet_name = src_sheet_name
                 
                 # Determine target name
                 if target_name:
@@ -451,7 +454,8 @@ class WorkbookAppendNode(BaseNode):
                     t_name = f"{base_t_name}_{counter}"
                     counter += 1
                 
-                workbook[t_name] = df
+                # Wrap in StyledSheet
+                workbook[t_name] = StyledSheet(file_path, actual_sheet_name, df, is_full_copy=True)
                 
         except Exception as e:
             raise ValueError(f"读取文件失败 {file_path}: {e}")
@@ -966,8 +970,37 @@ class WorkbookSaveNode(BaseNode):
             # If index is RangeIndex(0, N, 1), it means no rows were dropped/reordered
             is_sequential = isinstance(df.index, pd.RangeIndex) and df.index.step == 1 and df.index.start == 0
             
+            # Helper to copy a row from source to target
+            def copy_src_row(s_row, t_row):
+                # Copy row dimensions
+                if s_row in src_ws.row_dimensions:
+                    target_ws.row_dimensions[t_row] = copy_obj(src_ws.row_dimensions[s_row])
+                    
+                for col in range(1, src_ws.max_column + 1):
+                    src_cell = src_ws.cell(row=s_row, column=col)
+                    tgt_cell = target_ws.cell(row=t_row, column=col)
+                    
+                    tgt_cell.value = sanitize_value(src_cell.value)
+                    if src_cell.has_style:
+                        tgt_cell.font = copy_obj(src_cell.font)
+                        tgt_cell.border = copy_obj(src_cell.border)
+                        tgt_cell.fill = copy_obj(src_cell.fill)
+                        tgt_cell.number_format = copy_obj(src_cell.number_format)
+                        tgt_cell.protection = copy_obj(src_cell.protection)
+                        tgt_cell.alignment = copy_obj(src_cell.alignment)
+
+            # 0. Pre-Header Rows (Only for full copy)
+            if styled.is_full_copy and header_row_idx > 1:
+                for r in range(1, header_row_idx):
+                    copy_src_row(r, start_row)
+                    start_row += 1
+
             # 1. Copy Header
-            if start_row == 1:
+            if start_row == 1 or (styled.is_full_copy and header_row_idx > 1):
+                # If we copied pre-header rows, start_row is already advanced.
+                # But usually header is copied if it's the first thing we write to this sheet (start_row==1)
+                # OR if we are doing a full copy, we definitely want the header.
+                
                 # Copy header row from source
                 for col in range(1, src_ws.max_column + 1):
                     src_cell = src_ws.cell(row=header_row_idx, column=col)
@@ -1004,6 +1037,8 @@ class WorkbookSaveNode(BaseNode):
             
             # 2. Copy Data Rows
             total_rows = len(df)
+            last_src_row = header_row_idx # Track last processed source row
+            
             for idx, row_data in df.iterrows():
                 # Progress logging for large files
                 if idx % 100 == 0:
@@ -1013,6 +1048,7 @@ class WorkbookSaveNode(BaseNode):
                 try:
                     if isinstance(idx, int):
                         src_row_idx = header_row_idx + 1 + idx
+                        last_src_row = src_row_idx
                     else:
                         src_row_idx = None
                     
@@ -1047,7 +1083,15 @@ class WorkbookSaveNode(BaseNode):
                 except Exception as e:
                     raise ValueError(f"复制带格式数据失败，位置: 第 {idx} 行 (源文件行号: {src_row_idx if src_row_idx else '未知'}). 错误: {e}")
             
-            # 3. Copy Merged Cells in Data Area (Only if sequential/unfiltered)
+            # 3. Post-Data Rows (Only for full copy)
+            # This handles empty rows at the end that Pandas skipped but have formatting
+            if styled.is_full_copy and last_src_row < src_ws.max_row:
+                print(f"Copying trailing empty rows from {last_src_row + 1} to {src_ws.max_row}")
+                for r in range(last_src_row + 1, src_ws.max_row + 1):
+                    copy_src_row(r, start_row)
+                    start_row += 1
+
+            # 4. Copy Merged Cells in Data Area (Only if sequential/unfiltered)
             if is_sequential:
                 # Calculate offset between source data start and target data start
                 # Source data starts at: header_row_idx + 1
@@ -1074,18 +1118,57 @@ class WorkbookSaveNode(BaseNode):
                         
                         # Let's find target_data_start
                         # It is `start_row - len(df)` (since start_row was incremented in loop)
-                        target_data_start = start_row - len(df)
+                        # BUT if we added post-data rows, start_row is even further.
+                        # We need to be careful.
                         
-                        offset = target_data_start - (header_row_idx + 1)
-                        
-                        min_row = range_.min_row + offset
-                        max_row = range_.max_row + offset
-                        
-                        try:
-                            target_ws.merge_cells(start_row=min_row, start_column=range_.min_col,
-                                                end_row=max_row, end_column=range_.max_col)
-                        except Exception as e:
-                            print(f"Warning: Failed to merge cells {range_}: {e}")
+                        # Actually, if is_full_copy is True, the offset is constant for the whole block.
+                        # Offset = (Target Header Row) - (Source Header Row)
+                        # Target Header Row was `start_row` at the beginning of this function (if header copied)
+                        # Wait, start_row changes.
+                        pass
+                
+                # Simplified Merge Cell Logic for Full Copy
+                if styled.is_full_copy:
+                     # If full copy, we copied everything sequentially.
+                     # We can just copy all merged cells that weren't handled in header section
+                     # Offset is determined by the shift of the header row.
+                     # Target Header Row index: start_row - (total_rows + post_data_rows) - 1? No.
+                     
+                     # Let's rely on the fact that we copied header to `start_row` (initial).
+                     # So offset = initial_start_row - header_row_idx.
+                     # But we don't have initial_start_row anymore.
+                     # We can deduce it.
+                     # Current start_row = initial_start_row + (pre_header) + 1 (header) + total_rows + post_data
+                     
+                     # Actually, the previous logic for data area merge was:
+                     # offset = target_data_start - (header_row_idx + 1)
+                     # target_data_start is where the first data row was written.
+                     # That is `start_row` BEFORE the data loop.
+                     # Which is `start_row` AFTER header loop.
+                     
+                     # Let's just use the existing logic but extend it to cover post-data rows?
+                     # The existing logic iterates ALL ranges and checks `min_row > header_row_idx`.
+                     # This covers data AND post-data rows if the offset is correct.
+                     
+                     # We need `target_data_start`.
+                     # It is `start_row` - (rows written in post-data) - (rows written in data).
+                     rows_written_post = src_ws.max_row - last_src_row if last_src_row < src_ws.max_row else 0
+                     rows_written_data = len(df)
+                     
+                     target_data_start = start_row - rows_written_post - rows_written_data
+                     
+                     offset = target_data_start - (header_row_idx + 1)
+                     
+                     for range_ in src_ws.merged_cells.ranges:
+                        if range_.min_row > header_row_idx:
+                            min_row = range_.min_row + offset
+                            max_row = range_.max_row + offset
+                            
+                            try:
+                                target_ws.merge_cells(start_row=min_row, start_column=range_.min_col,
+                                                    end_row=max_row, end_column=range_.max_col)
+                            except Exception as e:
+                                print(f"Warning: Failed to merge cells {range_}: {e}")
 
             return start_row
             
