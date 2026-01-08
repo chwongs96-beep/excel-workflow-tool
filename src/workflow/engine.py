@@ -149,7 +149,7 @@ class Workflow:
         
         return ancestors
 
-    def execute_node(self, target_node_id: str, progress_callback=None) -> Dict[str, Any]:
+    def execute_node(self, target_node_id: str, progress_callback=None, external_context: Dict[str, Any] = None) -> Dict[str, Any]:
         """Execute the workflow up to a specific node"""
         if target_node_id not in self.nodes:
             raise ValueError(f"Node {target_node_id} not found")
@@ -172,8 +172,11 @@ class Workflow:
         for i, node_id in enumerate(execution_order):
             node = self.nodes[node_id]
             
-            # Inject global params as context
-            node.set_context(self.global_params)
+            # Inject global params and external context
+            context = self.global_params.copy()
+            if external_context:
+                context.update(external_context)
+            node.set_context(context)
             
             # Inject progress callback
             if progress_callback:
@@ -220,7 +223,7 @@ class Workflow:
         
         return results
 
-    def execute(self, progress_callback=None) -> Dict[str, Any]:
+    def execute(self, progress_callback=None, external_context: Dict[str, Any] = None) -> Dict[str, Any]:
         """Execute the entire workflow"""
         execution_order = self.get_execution_order()
         node_outputs: Dict[str, Dict[str, Any]] = {}
@@ -231,8 +234,11 @@ class Workflow:
         for i, node_id in enumerate(execution_order):
             node = self.nodes[node_id]
             
-            # Inject global params as context
-            node.set_context(self.global_params)
+            # Inject global params and external context
+            context = self.global_params.copy()
+            if external_context:
+                context.update(external_context)
+            node.set_context(context)
             
             # Inject progress callback
             if progress_callback:

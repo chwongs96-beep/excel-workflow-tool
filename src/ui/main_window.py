@@ -6,6 +6,8 @@ import os
 import sys
 import json
 import copy
+import uuid
+import platform
 from pathlib import Path
 from typing import Optional, List, Dict, Any
 from datetime import datetime
@@ -13,7 +15,7 @@ from datetime import datetime
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
     QSplitter, QMenuBar, QMenu, QToolBar, QStatusBar,
-    QFileDialog, QMessageBox, QLabel, QPushButton,
+    QFileDialog, QMessageBox, QLabel, QPushButton, QDialog,
     QDockWidget, QListWidget, QListWidgetItem, QFrame,
     QScrollArea, QSizePolicy, QLineEdit, QApplication
 )
@@ -25,7 +27,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from src.workflow.engine import Workflow
 from src.nodes.node_registry import NodeRegistry
-# from src.nodes import excel_nodes  # Import to register nodes
+from src.nodes import excel_nodes  # Import to register nodes
 from src.nodes import merge_nodes  # Import to register merge nodes
 from src.ui.canvas import WorkflowCanvas
 from src.ui.node_config import NodeConfigPanel
@@ -1025,13 +1027,42 @@ class MainWindow(QMainWindow):
             self.canvas.update()
             self.statusbar.showMessage(f"已复制节点: {source_node.node_name}")
     
+    def _generate_system_params(self) -> Dict[str, str]:
+        """Generate system placeholder parameters"""
+        now = datetime.now()
+        params = {
+            "DATE": now.strftime("%Y-%m-%d"),
+            "TIME": now.strftime("%H:%M:%S"),
+            "YEAR": now.strftime("%Y"),
+            "MONTH": now.strftime("%m"),
+            "DAY": now.strftime("%d"),
+            "TIMESTAMP": now.strftime("%Y%m%d_%H%M%S"),
+            "UUID": str(uuid.uuid4()),
+            "DESKTOP": str(Path.home() / "Desktop"),
+            "DOCUMENTS": str(Path.home() / "Documents"),
+            "DOWNLOADS": str(Path.home() / "Downloads"),
+        }
+        return params
+
     def _execute_workflow(self):
         """Execute the workflow"""
         if not self.workflow.nodes:
             QMessageBox.information(self, "提示", "工作流中没有节点可执行。")
             return
         
+        # 1. Open Global Params Dialog
+        dialog = GlobalParamsDialog(self.workflow, self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            self.statusbar.showMessage("执行已取消")
+            return
+            
+        # Update user params
+        self.workflow.global_params = dialog.get_params()
+        
         self.statusbar.showMessage("正在执行工作流...")
+        
+        # Generate system params
+        system_params = self._generate_system_params()
         
         # Set all nodes to pending
         for node_id in self.workflow.nodes:
@@ -1056,7 +1087,8 @@ class MainWindow(QMainWindow):
                     self.canvas.set_node_status(node_id, 'running')
                 QApplication.processEvents()
             
-            results = self.workflow.execute(progress)
+            # Execute with external context
+            results = self.workflow.execute(progress, external_context=system_params)
             
             # Update node status based on results
             for node_id, result in results.items():
@@ -1075,18 +1107,18 @@ class MainWindow(QMainWindow):
             if last_output is not None:
                 self.preview_panel.set_data(last_output)
             
-            # Stop animation
-            self.canvas.stop_animation()
-            
             self.statusbar.showMessage("工作流执行成功！")
             QMessageBox.information(self, "成功", "工作流执行成功！")
             
         except Exception as e:
-            # Stop animation and clear status on error
-            self.canvas.stop_animation()
+            # Clear status on error
             self.canvas.clear_node_status()
             self.statusbar.showMessage(f"执行失败: {e}")
             QMessageBox.critical(self, "执行错误", str(e))
+        finally:
+            # Stop animation and restore params
+            self.canvas.stop_animation()
+            self.workflow.global_params = original_params
     
     def _execute_node(self, target_node_id: str):
         """Execute the workflow up to a specific node"""
