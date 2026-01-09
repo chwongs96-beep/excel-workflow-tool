@@ -1116,9 +1116,8 @@ class MainWindow(QMainWindow):
             self.statusbar.showMessage(f"执行失败: {e}")
             QMessageBox.critical(self, "执行错误", str(e))
         finally:
-            # Stop animation and restore params
+            # Stop animation
             self.canvas.stop_animation()
-            self.workflow.global_params = original_params
     
     def _execute_node(self, target_node_id: str):
         """Execute the workflow up to a specific node"""
