@@ -1,5 +1,6 @@
 import pandas as pd
 import openpyxl
+import warnings
 from openpyxl.utils import get_column_letter
 from openpyxl.cell.cell import ILLEGAL_CHARACTERS_RE
 from copy import copy as copy_obj
@@ -10,6 +11,10 @@ from .node_registry import register_node
 import re
 
 import shutil
+
+# Suppress warnings from pandas and openpyxl
+warnings.filterwarnings('ignore', category=UserWarning)
+warnings.filterwarnings('ignore', category=FutureWarning)
 
 def sanitize_sheet_name(name):
     """Sanitize sheet name to be compatible with Excel"""

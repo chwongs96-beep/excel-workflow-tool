@@ -3,10 +3,14 @@ Excel-related nodes for reading, writing, and processing Excel files
 """
 
 import pandas as pd
+import warnings
 from pathlib import Path
 from typing import Any, Dict, List
 from .base_node import BaseNode
 from .node_registry import register_node
+
+# Suppress openpyxl warnings
+warnings.filterwarnings('ignore', category=UserWarning, module='openpyxl')
 
 
 @register_node

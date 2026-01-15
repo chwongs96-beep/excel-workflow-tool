@@ -8,6 +8,7 @@ import json
 import copy
 import uuid
 import platform
+import warnings
 from pathlib import Path
 from typing import Optional, List, Dict, Any
 from datetime import datetime
@@ -26,6 +27,7 @@ from PyQt6.QtGui import QAction, QIcon, QDrag, QColor, QPalette, QPixmap, QFont,
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from src.workflow.engine import Workflow
+from src.workflow.worker import WorkflowWorker
 from src.nodes.node_registry import NodeRegistry
 from src.nodes import excel_nodes  # Import to register nodes
 from src.nodes import merge_nodes  # Import to register merge nodes
@@ -198,8 +200,17 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         
+        # Suppress warnings from pandas and openpyxl
+        warnings.filterwarnings('ignore', category=UserWarning)
+        warnings.filterwarnings('ignore', category=FutureWarning)
+        warnings.filterwarnings('ignore', category=DeprecationWarning)
+        
         self.workflow = Workflow()
         self.current_file: Optional[str] = None
+        
+        # Worker thread for background execution
+        self._worker: Optional[WorkflowWorker] = None
+        self._is_executing = False
         
         # Undo/Redo history
         self._undo_stack: List[Dict[str, Any]] = []
@@ -1045,9 +1056,13 @@ class MainWindow(QMainWindow):
         return params
 
     def _execute_workflow(self):
-        """Execute the workflow"""
+        """Execute the workflow in background thread"""
         if not self.workflow.nodes:
             QMessageBox.information(self, "提示", "工作流中没有节点可执行。")
+            return
+        
+        if self._is_executing:
+            QMessageBox.warning(self, "警告", "工作流正在执行中，请等待完成。")
             return
         
         # 1. Open Global Params Dialog
@@ -1070,54 +1085,70 @@ class MainWindow(QMainWindow):
         
         # Start animation
         self.canvas.start_animation()
-        QApplication.processEvents()
         
-        try:
-            def progress(current, total, node_name, node_id=None, detail_msg=None):
-                msg = f"正在执行: {node_name} ({current}/{total})"
-                if detail_msg:
-                    msg += f" - {detail_msg}"
-                self.statusbar.showMessage(msg)
-                
-                if node_id:
-                    # Set previous running nodes to success before setting new one to running
-                    for nid in self.workflow.nodes:
-                        if self.canvas.node_status.get(nid) == 'running':
-                            self.canvas.set_node_status(nid, 'success')
-                    self.canvas.set_node_status(node_id, 'running')
-                QApplication.processEvents()
-            
-            # Execute with external context
-            results = self.workflow.execute(progress, external_context=system_params)
-            
-            # Update node status based on results
-            for node_id, result in results.items():
-                if result["success"]:
-                    self.canvas.set_node_status(node_id, 'success')
-                else:
-                    self.canvas.set_node_status(node_id, 'error')
-            
-            # Show results in preview panel
-            last_output = None
-            for node_id, result in results.items():
-                if result["success"] and result.get("output"):
-                    for port_name, data in result["output"].items():
-                        last_output = data
-            
-            if last_output is not None:
-                self.preview_panel.set_data(last_output)
-            
-            self.statusbar.showMessage("工作流执行成功！")
-            QMessageBox.information(self, "成功", "工作流执行成功！")
-            
-        except Exception as e:
-            # Clear status on error
-            self.canvas.clear_node_status()
-            self.statusbar.showMessage(f"执行失败: {e}")
-            QMessageBox.critical(self, "执行错误", str(e))
-        finally:
-            # Stop animation
-            self.canvas.stop_animation()
+        # Mark as executing
+        self._is_executing = True
+        
+        # Create and configure worker thread
+        self._worker = WorkflowWorker(self.workflow, external_context=system_params)
+        self._worker.progress_updated.connect(self._on_execution_progress)
+        self._worker.execution_finished.connect(self._on_execution_finished)
+        self._worker.execution_failed.connect(self._on_execution_failed)
+        
+        # Start execution in background
+        self._worker.start()
+    
+    def _on_execution_progress(self, current: int, total: int, node_name: str, node_id: str, detail_msg: str):
+        """Handle progress updates from worker thread"""
+        msg = f"正在执行: {node_name} ({current}/{total})"
+        if detail_msg:
+            msg += f" - {detail_msg}"
+        self.statusbar.showMessage(msg)
+        
+        if node_id:
+            # Set previous running nodes to success before setting new one to running
+            for nid in self.workflow.nodes:
+                if self.canvas.node_status.get(nid) == 'running':
+                    self.canvas.set_node_status(nid, 'success')
+            self.canvas.set_node_status(node_id, 'running')
+    
+    def _on_execution_finished(self, results: Dict[str, Any]):
+        """Handle successful execution completion"""
+        self._is_executing = False
+        
+        # Update node status based on results
+        for node_id, result in results.items():
+            if result["success"]:
+                self.canvas.set_node_status(node_id, 'success')
+            else:
+                self.canvas.set_node_status(node_id, 'error')
+        
+        # Show results in preview panel
+        last_output = None
+        for node_id, result in results.items():
+            if result["success"] and result.get("output"):
+                for port_name, data in result["output"].items():
+                    last_output = data
+        
+        if last_output is not None:
+            self.preview_panel.set_data(last_output)
+        
+        # Stop animation
+        self.canvas.stop_animation()
+        
+        self.statusbar.showMessage("工作流执行成功！")
+        QMessageBox.information(self, "成功", "工作流执行成功！")
+    
+    def _on_execution_failed(self, error_msg: str):
+        """Handle execution failure"""
+        self._is_executing = False
+        
+        # Clear status on error
+        self.canvas.clear_node_status()
+        self.canvas.stop_animation()
+        
+        self.statusbar.showMessage(f"执行失败: {error_msg}")
+        QMessageBox.critical(self, "执行错误", error_msg)
     
     def _execute_node(self, target_node_id: str):
         """Execute the workflow up to a specific node"""
