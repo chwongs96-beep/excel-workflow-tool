@@ -172,6 +172,13 @@ class Workflow:
         for i, node_id in enumerate(execution_order):
             node = self.nodes[node_id]
             
+            # Report progress before starting node
+            if progress_callback:
+                try:
+                    progress_callback(i + 1, total_nodes, f"准备执行: {node.node_name}", node_id, "初始化中...")
+                except TypeError:
+                    progress_callback(i + 1, total_nodes, f"准备执行: {node.node_name}", node_id)
+            
             # Inject global params and external context
             context = self.global_params.copy()
             if external_context:
@@ -233,6 +240,13 @@ class Workflow:
         
         for i, node_id in enumerate(execution_order):
             node = self.nodes[node_id]
+            
+            # Report progress before starting node
+            if progress_callback:
+                try:
+                    progress_callback(i + 1, total_nodes, f"准备执行: {node.node_name}", node_id, "初始化中...")
+                except TypeError:
+                    progress_callback(i + 1, total_nodes, f"准备执行: {node.node_name}", node_id)
             
             # Inject global params and external context
             context = self.global_params.copy()
