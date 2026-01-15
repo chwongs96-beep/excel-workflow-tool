@@ -5,7 +5,7 @@ Global Parameters Dialog - UI for managing global workflow parameters
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QTableWidget, 
     QTableWidgetItem, QPushButton, QLabel, QHeaderView,
-    QMessageBox, QInputDialog, QFileDialog, QFrame
+    QMessageBox, QInputDialog, QFileDialog, QFrame, QWidget
 )
 from PyQt6.QtCore import Qt
 
