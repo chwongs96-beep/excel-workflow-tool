@@ -123,6 +123,9 @@ class WriteExcelNode(BaseNode):
         
         file_path = self.get_param("file_path")
         
+        # Report actual output path
+        self.report_progress(f"写入文件: {file_path}")
+        
         # Ensure file extension is .xlsx
         if not str(file_path).lower().endswith('.xlsx'):
             file_path = str(file_path) + '.xlsx'

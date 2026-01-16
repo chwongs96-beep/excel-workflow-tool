@@ -49,7 +49,8 @@ class GlobalParamsDialog(QDialog):
         
         desc = QLabel(
             "在此定义全局参数，可以在节点配置中使用 {参数名} 进行引用。\n"
-            "例如: 定义 base_path = C:/Data，在节点中使用 {base_path}/file.xlsx\n"
+            "⚠️ 重要：参数名不要加花括号！\n"
+            "例如: 参数名填 data，使用时填 {data}_report.xlsx\n"
             "点击“执行”时，您可以临时修改这些值。"
         )
         desc.setWordWrap(True)
@@ -220,6 +221,13 @@ class GlobalParamsDialog(QDialog):
             if key_item and val_item:
                 key = key_item.text().strip()
                 val = val_item.text().strip()
+                
+                # Auto-remove curly braces from key if user added them
+                if key.startswith('{') and key.endswith('}'):
+                    key = key[1:-1].strip()
+                    # Update the table to show the corrected key
+                    key_item.setText(key)
+                
                 if key:
                     params[key] = val
         return params

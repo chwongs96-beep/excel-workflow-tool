@@ -101,14 +101,31 @@ class BaseNode:
         # Perform substitution if value is string and context is available
         if isinstance(val, str) and self._context:
             try:
-                # Simple substitution for {var}
+                original_val = val
+                # Simple substitution for {var} - case insensitive
                 # We iterate over context keys to replace
                 for k, v in self._context.items():
-                    placeholder = "{" + k + "}"
-                    if placeholder in val:
-                        val = val.replace(placeholder, str(v))
-            except Exception:
-                pass # Ignore substitution errors
+                    # Support both {KEY} and {key}
+                    placeholder_upper = "{" + k.upper() + "}"
+                    placeholder_lower = "{" + k.lower() + "}"
+                    placeholder_exact = "{" + k + "}"
+                    
+                    # Replace all variations
+                    if placeholder_upper in val:
+                        val = val.replace(placeholder_upper, str(v))
+                    if placeholder_lower in val:
+                        val = val.replace(placeholder_lower, str(v))
+                    if placeholder_exact in val and placeholder_exact not in [placeholder_upper, placeholder_lower]:
+                        val = val.replace(placeholder_exact, str(v))
+                
+                # Debug: report if substitution occurred
+                if val != original_val and self._progress_callback:
+                    self._progress_callback(f"参数替换: {original_val} -> {val}")
+                    
+            except Exception as e:
+                # Log substitution errors
+                if self._progress_callback:
+                    self._progress_callback(f"参数替换失败: {e}")
                 
         return val
     
