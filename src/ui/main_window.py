@@ -98,6 +98,10 @@ class NodePalette(QDockWidget):
         # Store all node items for filtering
         self.all_node_items = []
         
+        # Track category collapsed/expanded state
+        # Only "灵活合并" is expanded by default, others are collapsed
+        self.category_expanded = {}
+        
         # Create main widget
         main_widget = QWidget()
         layout = QVBoxLayout(main_widget)
@@ -124,6 +128,7 @@ class NodePalette(QDockWidget):
         # Create draggable list widget for nodes
         self.node_list = DraggableNodeList()
         self.node_list.setSpacing(2)
+        self.node_list.itemClicked.connect(self._on_item_clicked)
         
         # Populate with nodes by category
         self._populate_nodes()
@@ -141,16 +146,26 @@ class NodePalette(QDockWidget):
         
         categories = NodeRegistry.get_nodes_by_category()
         for category, nodes in sorted(categories.items()):
-            # Add category header
-            header = QListWidgetItem(f"── {category} ──")
-            header.setFlags(Qt.ItemFlag.NoItemFlags)
+            # Initialize collapse state: only "灵活合并" is expanded by default
+            if category not in self.category_expanded:
+                self.category_expanded[category] = (category == "灵活合并")
+            
+            is_expanded = self.category_expanded[category]
+            
+            # Add category header with expand/collapse indicator
+            expand_icon = "▼" if is_expanded else "▶"
+            header = QListWidgetItem(f"{expand_icon} {category}")
+            header.setFlags(Qt.ItemFlag.ItemIsEnabled)  # Make it clickable but not draggable
             header.setBackground(QColor("#2d2d2d"))
-            header.setForeground(QColor("#888888"))
-            header.setData(Qt.ItemDataRole.UserRole, "header")
+            header.setForeground(QColor("#db0011"))  # Use brand color for headers
+            header.setData(Qt.ItemDataRole.UserRole, f"header:{category}")
+            font = header.font()
+            font.setBold(True)
+            header.setFont(font)
             self.node_list.addItem(header)
             self.all_node_items.append((header, category, None))
             
-            # Add nodes in this category
+            # Add nodes in this category (hidden if category is collapsed)
             for node_class in nodes:
                 item = NodeListItem(node_class)
                 item.setToolTip(node_class.node_description)
@@ -158,17 +173,53 @@ class NodePalette(QDockWidget):
                 color = QColor(node_class.node_color)
                 color.setAlpha(50)
                 item.setBackground(color)
+                item.setHidden(not is_expanded)  # Hide if category is collapsed
                 self.node_list.addItem(item)
                 self.all_node_items.append((item, category, node_class))
+    
+    def _on_item_clicked(self, item):
+        """Handle item click - toggle category if header is clicked"""
+        user_data = item.data(Qt.ItemDataRole.UserRole)
+        
+        # Check if it's a category header
+        if isinstance(user_data, str) and user_data.startswith("header:"):
+            category = user_data.replace("header:", "")
+            self._toggle_category(category)
+    
+    def _toggle_category(self, category):
+        """Toggle collapse/expand state of a category"""
+        # Toggle the state
+        self.category_expanded[category] = not self.category_expanded.get(category, False)
+        is_expanded = self.category_expanded[category]
+        
+        # Update header text and node visibility
+        for item, item_category, node_class in self.all_node_items:
+            if item_category == category:
+                if node_class is None:  # It's the header
+                    expand_icon = "▼" if is_expanded else "▶"
+                    item.setText(f"{expand_icon} {category}")
+                else:  # It's a node in this category
+                    # Only show if category is expanded AND search filter allows it
+                    if self.search_box.text().strip():
+                        # If search is active, respect search filter
+                        continue
+                    else:
+                        # No search, just toggle based on category state
+                        item.setHidden(not is_expanded)
     
     def _filter_nodes(self, text: str):
         """Filter nodes based on search text"""
         search_text = text.lower().strip()
         
         if not search_text:
-            # Show all items
-            for i in range(self.node_list.count()):
-                self.node_list.item(i).setHidden(False)
+            # No search - restore category collapsed/expanded states
+            for item, category, node_class in self.all_node_items:
+                if node_class is None:  # It's a header
+                    item.setHidden(False)
+                else:  # It's a node
+                    # Show only if category is expanded
+                    is_expanded = self.category_expanded.get(category, False)
+                    item.setHidden(not is_expanded)
             return
         
         # Track which categories have visible nodes
