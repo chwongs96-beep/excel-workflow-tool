@@ -11,12 +11,101 @@ from .node_registry import register_node
 import re
 import tempfile
 import os
+import hashlib
 
 import shutil
 
 # Suppress warnings from pandas and openpyxl
 warnings.filterwarnings('ignore', category=UserWarning)
 warnings.filterwarnings('ignore', category=FutureWarning)
+
+# Global cache for converted .xls files to avoid repeated conversions
+_xls_conversion_cache = {}
+
+def get_file_hash(file_path):
+    """Get MD5 hash of file for caching"""
+    hash_md5 = hashlib.md5()
+    with open(file_path, "rb") as f:
+        # Read in chunks for large files
+        for chunk in iter(lambda: f.read(4096), b""):
+            hash_md5.update(chunk)
+    return hash_md5.hexdigest()
+
+def convert_xls_to_xlsx(xls_file_path, use_cache=True):
+    """Convert .xls file to temporary .xlsx file for style preservation
+    
+    Args:
+        xls_file_path: Path to .xls file
+        use_cache: Whether to use cached conversion (default True)
+    """
+    try:
+        import time
+        start_time = time.time()
+        
+        # Check cache first
+        if use_cache:
+            file_hash = get_file_hash(xls_file_path)
+            cache_key = f"{xls_file_path}_{file_hash}"
+            
+            if cache_key in _xls_conversion_cache:
+                cached_path = _xls_conversion_cache[cache_key]
+                if os.path.exists(cached_path):
+                    elapsed = time.time() - start_time
+                    print(f"✓ 使用缓存的转换文件: {Path(xls_file_path).name} (耗时: {elapsed:.2f}秒)")
+                    return cached_path
+                else:
+                    # Cache entry is stale, remove it
+                    del _xls_conversion_cache[cache_key]
+        
+        # Create temporary .xlsx file
+        temp_fd, temp_path = tempfile.mkstemp(suffix='.xlsx', prefix='xls_conv_')
+        os.close(temp_fd)  # Close the file descriptor
+        
+        print(f"正在转换 .xls 文件: {Path(xls_file_path).name} ...")
+        
+        # Read all sheets from .xls (using xlrd engine)
+        read_start = time.time()
+        xls_data = pd.read_excel(xls_file_path, sheet_name=None, engine='xlrd')
+        read_time = time.time() - read_start
+        print(f"  - 读取完成 ({len(xls_data)} 个工作表, 耗时: {read_time:.2f}秒)")
+        
+        # Write to .xlsx with openpyxl engine
+        write_start = time.time()
+        with pd.ExcelWriter(temp_path, engine='openpyxl') as writer:
+            for sheet_name, df in xls_data.items():
+                df.to_excel(writer, sheet_name=sheet_name, index=False)
+        write_time = time.time() - write_start
+        print(f"  - 写入完成 (耗时: {write_time:.2f}秒)")
+        
+        # Add to cache
+        if use_cache:
+            _xls_conversion_cache[cache_key] = temp_path
+            elapsed = time.time() - start_time
+            print(f"✓ 转换完成并缓存: {Path(xls_file_path).name} (总耗时: {elapsed:.2f}秒)")
+        
+        return temp_path
+    except Exception as e:
+        if 'temp_path' in locals() and os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except:
+                pass
+        raise ValueError(f"转换.xls文件失败: {e}")
+
+def clear_xls_conversion_cache():
+    """清理所有缓存的.xls转换文件"""
+    global _xls_conversion_cache
+    count = 0
+    for cache_key, temp_path in list(_xls_conversion_cache.items()):
+        if os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+                count += 1
+            except:
+                pass
+    _xls_conversion_cache.clear()
+    if count > 0:
+        print(f"已清理 {count} 个缓存的转换文件")
 
 def sanitize_sheet_name(name):
     """Sanitize sheet name to be compatible with Excel"""
@@ -32,30 +121,6 @@ def sanitize_value(value):
         # Use openpyxl's regex for illegal characters
         return ILLEGAL_CHARACTERS_RE.sub('', value)
     return value
-
-def convert_xls_to_xlsx(xls_file_path):
-    """Convert .xls file to temporary .xlsx file for style preservation"""
-    try:
-        # Create temporary .xlsx file
-        temp_fd, temp_path = tempfile.mkstemp(suffix='.xlsx')
-        os.close(temp_fd)  # Close the file descriptor
-        
-        # Read all sheets from .xls
-        xls_data = pd.read_excel(xls_file_path, sheet_name=None, engine='xlrd')
-        
-        # Write to .xlsx with openpyxl engine
-        with pd.ExcelWriter(temp_path, engine='openpyxl') as writer:
-            for sheet_name, df in xls_data.items():
-                df.to_excel(writer, sheet_name=sheet_name, index=False)
-        
-        return temp_path
-    except Exception as e:
-        if 'temp_path' in locals() and os.path.exists(temp_path):
-            try:
-                os.remove(temp_path)
-            except:
-                pass
-        raise ValueError(f"转换.xls文件失败: {e}")
 
 class StyledSheet:
     """Wrapper to hold sheet info for style-preserved copying"""
@@ -82,11 +147,16 @@ class StyledSheet:
     
     def cleanup(self):
         """Clean up temporary converted file if exists"""
-        if self.is_temp_converted and self.file_path and os.path.exists(self.file_path):
-            try:
-                os.remove(self.file_path)
-            except:
-                pass
+        # Only clean up if not using cache
+        if self.is_temp_converted and self.file_path:
+            # Check if this is a cached file
+            is_cached = any(self.file_path == cached_path 
+                          for cached_path in _xls_conversion_cache.values())
+            if not is_cached and os.path.exists(self.file_path):
+                try:
+                    os.remove(self.file_path)
+                except:
+                    pass
 
 def read_csv_with_options(file_path, encoding_opt='auto', delimiter_opt='auto', header_row=0):
     """Helper to read CSV with flexible options"""
