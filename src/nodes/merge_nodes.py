@@ -239,7 +239,7 @@ class WorkbookCreateNode(BaseNode):
     node_type = "workbook_create"
     node_name = "创建工作簿(输入)"
     node_category = "灵活合并"
-    node_description = "开始一个新的工作簿，可选从现有文件加载"
+    node_description = "开始一个新的工作簿，可选从现有文件加载（注意：.xls格式不支持样式保留）"
     node_color = "#22c55e"  # Green
     
     def _setup_ports(self):
@@ -262,6 +262,10 @@ class WorkbookCreateNode(BaseNode):
         
         if base_file and Path(base_file).exists():
             try:
+                # Warn if .xls file is used
+                if str(base_file).lower().endswith('.xls'):
+                    self.report_progress(f"⚠️ .xls格式不支持样式保留: {Path(base_file).name}")
+                
                 # Read all sheets as DataFrames
                 dfs = pd.read_excel(base_file, sheet_name=None)
                 
@@ -282,7 +286,7 @@ class WorkbookAppendNode(BaseNode):
     node_type = "workbook_append"
     node_name = "追加工作表"
     node_category = "灵活合并"
-    node_description = "从另一个Excel文件读取工作表并添加到当前工作簿"
+    node_description = "从另一个Excel文件读取工作表并添加到当前工作簿（注意：.xls格式不支持样式保留）"
     node_color = "#8b5cf6"  # Violet
     
     def _setup_ports(self):
@@ -438,6 +442,11 @@ class WorkbookAppendNode(BaseNode):
         
         try:
             is_csv = str(file_path).lower().endswith('.csv')
+            is_xls = str(file_path).lower().endswith('.xls')
+            
+            # Warn if .xls file is used
+            if is_xls:
+                self.report_progress(f"⚠️ .xls格式不支持样式保留: {Path(file_path).name}")
             
             if is_csv:
                 # CSV handling
@@ -532,7 +541,7 @@ class SheetCopyNode(BaseNode):
     node_type = "sheet_copy"
     node_name = "复制/合并数据"
     node_category = "灵活合并"
-    node_description = "将Excel/CSV数据复制到工作簿，支持列映射和空值检查"
+    node_description = "将Excel/CSV数据复制到工作簿，支持列映射和空值检查（注意：.xls格式不支持样式保留）"
     node_color = "#f59e0b"  # Amber
     
     def _setup_ports(self):
@@ -764,6 +773,10 @@ class SheetCopyNode(BaseNode):
 
             # 4. Write to Target
             if preserve_formatting and not is_csv:
+                # Warn if .xls file is used with style preservation
+                if str(file_path).lower().endswith('.xls'):
+                    self.report_progress(f"⚠️ .xls格式不支持样式保留: {Path(file_path).name}")
+                
                 # Check if this is a full copy (optimization)
                 is_full_copy = (
                     copy_mode == "whole" and 
@@ -1017,7 +1030,8 @@ class WorkbookSaveNode(BaseNode):
         try:
             # Check for .xls file (not supported by openpyxl)
             if str(styled.file_path).lower().endswith('.xls'):
-                print(f"Warning: .xls format does not support style preservation. Copying data only for {styled.file_path}")
+                warning_msg = f"⚠️ .xls格式不支持样式保留，仅复制数据: {Path(styled.file_path).name}"
+                self.report_progress(warning_msg)
                 # Fallback to fast data writing
                 df = styled.df_filtered
                 
