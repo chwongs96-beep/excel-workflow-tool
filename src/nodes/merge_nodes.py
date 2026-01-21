@@ -109,8 +109,28 @@ def read_csv_with_options(file_path, encoding_opt='auto', delimiter_opt='auto', 
     last_error = None
     for enc in encodings:
         try:
-            # Use engine='python' for better delimiter detection and regex separators
-            return pd.read_csv(file_path, sep=sep, encoding=enc, header=header_row, engine='python')
+            # Use engine='python' for better delimiter detection
+            # Keep all data by using keep_default_na=False to prevent auto-conversion of empty strings
+            df = pd.read_csv(
+                file_path, 
+                sep=sep, 
+                encoding=enc, 
+                header=header_row, 
+                engine='python',
+                keep_default_na=False,  # Don't auto-convert empty strings to NaN
+                na_values=[''],  # Only treat empty strings as NaN
+                skipinitialspace=True  # Strip spaces after delimiter
+            )
+            
+            # Debug: print first few rows info
+            print(f"CSV读取成功: {Path(file_path).name} - {len(df)} 行 x {len(df.columns)} 列, 编码: {enc}")
+            if sep:
+                print(f"使用分隔符: {repr(sep)}")
+            else:
+                print(f"使用自动检测分隔符")
+            
+            return df
+            
         except Exception as e:
             last_error = e
             continue
@@ -499,7 +519,9 @@ class WorkbookAppendNode(BaseNode):
             
             if is_csv:
                 # CSV handling
+                self.report_progress(f"📄 读取CSV文件: {Path(file_path).name}")
                 df = read_csv_with_options(file_path, csv_encoding, csv_delimiter, header_row)
+                self.report_progress(f"✅ CSV读取成功: {len(df)} 行 x {len(df.columns)} 列")
                 
                 default_name = Path(file_path).stem
                 
@@ -755,7 +777,9 @@ class SheetCopyNode(BaseNode):
         try:
             is_csv = str(file_path).lower().endswith('.csv')
             if is_csv:
+                self.report_progress(f"📄 读取CSV文件: {Path(file_path).name}")
                 df = read_csv_with_options(file_path, csv_encoding, csv_delimiter, header_row)
+                self.report_progress(f"✅ CSV读取成功: {len(df)} 行 x {len(df.columns)} 列")
             else:
                 # Excel
                 if not src_sheet_name:
@@ -789,8 +813,14 @@ class SheetCopyNode(BaseNode):
 
             # 3. Process Data based on Mode
             if copy_mode == "no_blank":
-                # Remove rows where all elements are NaN
+                # Remove rows where all elements are NaN or empty strings
+                # For CSV files, empty strings might not be NaN
+                if is_csv:
+                    # Check for both NaN and empty strings
+                    df = df.replace('', pd.NA)  # Convert empty strings to NA
                 df = df.dropna(how='all')
+                rows_after = len(df)
+                self.report_progress(f"🧹 去除空白行后: {rows_after} 行")
                 
             elif copy_mode == "columns":
                 # Parse mapping: "A=B; C=D" or "Name=Name"
@@ -850,7 +880,7 @@ class SheetCopyNode(BaseNode):
                     workbook[target_sheet] = StyledSheet(file_path, src_sheet_name, df, header_row, is_full_copy=is_full_copy)
                     
             else:
-                # Standard DataFrame mode
+                # Standard DataFrame mode (CSV or preserve_formatting=False)
                 if target_sheet in workbook and write_mode == "append":
                     target_data = workbook[target_sheet]
                     # If target is StyledSheet, we can't easily append DataFrame to it without breaking style logic
@@ -863,10 +893,13 @@ class SheetCopyNode(BaseNode):
                         target_data = pd.concat(dfs, ignore_index=True)
                     
                     if isinstance(target_data, pd.DataFrame):
+                        original_rows = len(target_data)
                         workbook[target_sheet] = pd.concat([target_data, df], ignore_index=True)
+                        self.report_progress(f"📊 追加数据: {original_rows} + {len(df)} = {len(workbook[target_sheet])} 行")
                 else:
                     # Overwrite or Create new
                     workbook[target_sheet] = df
+                    self.report_progress(f"📊 写入数据: {len(df)} 行 x {len(df.columns)} 列")
         
         except Exception as e:
             raise ValueError(f"处理文件失败 [{file_path}]: {e}")
