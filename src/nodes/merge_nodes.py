@@ -9,103 +9,12 @@ from typing import Any, Dict, List, Union
 from .base_node import BaseNode
 from .node_registry import register_node
 import re
-import tempfile
-import os
-import hashlib
 
 import shutil
 
 # Suppress warnings from pandas and openpyxl
 warnings.filterwarnings('ignore', category=UserWarning)
 warnings.filterwarnings('ignore', category=FutureWarning)
-
-# Global cache for converted .xls files to avoid repeated conversions
-_xls_conversion_cache = {}
-
-def get_file_hash(file_path):
-    """Get MD5 hash of file for caching"""
-    hash_md5 = hashlib.md5()
-    with open(file_path, "rb") as f:
-        # Read in chunks for large files
-        for chunk in iter(lambda: f.read(4096), b""):
-            hash_md5.update(chunk)
-    return hash_md5.hexdigest()
-
-def convert_xls_to_xlsx(xls_file_path, use_cache=True):
-    """Convert .xls file to temporary .xlsx file for style preservation
-    
-    Args:
-        xls_file_path: Path to .xls file
-        use_cache: Whether to use cached conversion (default True)
-    """
-    try:
-        import time
-        start_time = time.time()
-        
-        # Check cache first
-        if use_cache:
-            file_hash = get_file_hash(xls_file_path)
-            cache_key = f"{xls_file_path}_{file_hash}"
-            
-            if cache_key in _xls_conversion_cache:
-                cached_path = _xls_conversion_cache[cache_key]
-                if os.path.exists(cached_path):
-                    elapsed = time.time() - start_time
-                    print(f"✓ 使用缓存的转换文件: {Path(xls_file_path).name} (耗时: {elapsed:.2f}秒)")
-                    return cached_path
-                else:
-                    # Cache entry is stale, remove it
-                    del _xls_conversion_cache[cache_key]
-        
-        # Create temporary .xlsx file
-        temp_fd, temp_path = tempfile.mkstemp(suffix='.xlsx', prefix='xls_conv_')
-        os.close(temp_fd)  # Close the file descriptor
-        
-        print(f"正在转换 .xls 文件: {Path(xls_file_path).name} ...")
-        
-        # Read all sheets from .xls (using xlrd engine)
-        read_start = time.time()
-        xls_data = pd.read_excel(xls_file_path, sheet_name=None, engine='xlrd')
-        read_time = time.time() - read_start
-        print(f"  - 读取完成 ({len(xls_data)} 个工作表, 耗时: {read_time:.2f}秒)")
-        
-        # Write to .xlsx with openpyxl engine
-        write_start = time.time()
-        with pd.ExcelWriter(temp_path, engine='openpyxl') as writer:
-            for sheet_name, df in xls_data.items():
-                df.to_excel(writer, sheet_name=sheet_name, index=False)
-        write_time = time.time() - write_start
-        print(f"  - 写入完成 (耗时: {write_time:.2f}秒)")
-        
-        # Add to cache
-        if use_cache:
-            _xls_conversion_cache[cache_key] = temp_path
-            elapsed = time.time() - start_time
-            print(f"✓ 转换完成并缓存: {Path(xls_file_path).name} (总耗时: {elapsed:.2f}秒)")
-        
-        return temp_path
-    except Exception as e:
-        if 'temp_path' in locals() and os.path.exists(temp_path):
-            try:
-                os.remove(temp_path)
-            except:
-                pass
-        raise ValueError(f"转换.xls文件失败: {e}")
-
-def clear_xls_conversion_cache():
-    """清理所有缓存的.xls转换文件"""
-    global _xls_conversion_cache
-    count = 0
-    for cache_key, temp_path in list(_xls_conversion_cache.items()):
-        if os.path.exists(temp_path):
-            try:
-                os.remove(temp_path)
-                count += 1
-            except:
-                pass
-    _xls_conversion_cache.clear()
-    if count > 0:
-        print(f"已清理 {count} 个缓存的转换文件")
 
 def sanitize_sheet_name(name):
     """Sanitize sheet name to be compatible with Excel"""
@@ -125,49 +34,34 @@ def sanitize_value(value):
 class StyledSheet:
     """Wrapper to hold sheet info for style-preserved copying"""
     def __init__(self, file_path, sheet_name, df_filtered=None, header_row=0, is_full_copy=False):
-        self.original_file_path = file_path  # Keep original for reference
-        self.is_temp_converted = False
-        
-        # Auto-convert .xls to .xlsx for style preservation
-        if str(file_path).lower().endswith('.xls'):
-            try:
-                self.file_path = convert_xls_to_xlsx(file_path)
-                self.is_temp_converted = True
-            except Exception as e:
-                # Fallback to original if conversion fails
-                self.file_path = file_path
-                self.is_temp_converted = False
-        else:
-            self.file_path = file_path
-            
+        self.file_path = file_path
         self.sheet_name = sheet_name
         self.df_filtered = df_filtered
         self.header_row = header_row
         self.is_full_copy = is_full_copy
-    
-    def cleanup(self):
-        """Clean up temporary converted file if exists"""
-        # Only clean up if not using cache
-        if self.is_temp_converted and self.file_path:
-            # Check if this is a cached file
-            is_cached = any(self.file_path == cached_path 
-                          for cached_path in _xls_conversion_cache.values())
-            if not is_cached and os.path.exists(self.file_path):
-                try:
-                    os.remove(self.file_path)
-                except:
-                    pass
 
 def read_csv_with_options(file_path, encoding_opt='auto', delimiter_opt='auto', header_row=0):
     """Helper to read CSV with flexible options"""
     
     # Determine delimiter
     sep = None # Auto-detect
-    if delimiter_opt == 'comma': sep = ','
-    elif delimiter_opt == 'tab': sep = '\t'
-    elif delimiter_opt == 'semicolon': sep = ';'
-    elif delimiter_opt == 'pipe': sep = '|'
-    elif delimiter_opt == 'space': sep = ' '
+    engine = 'python'  # Default to python for auto-detection
+    
+    if delimiter_opt == 'comma': 
+        sep = ','
+        engine = 'c'  # Use faster C engine for known delimiters
+    elif delimiter_opt == 'tab': 
+        sep = '\t'
+        engine = 'c'
+    elif delimiter_opt == 'semicolon': 
+        sep = ';'
+        engine = 'c'
+    elif delimiter_opt == 'pipe': 
+        sep = '|'
+        engine = 'python'  # Python engine handles special chars better
+    elif delimiter_opt == 'space': 
+        sep = r'\s+'
+        engine = 'python'  # Regex requires python engine
     
     # Determine encoding list
     encodings = []
@@ -179,28 +73,26 @@ def read_csv_with_options(file_path, encoding_opt='auto', delimiter_opt='auto', 
     last_error = None
     for enc in encodings:
         try:
-            # Use engine='python' for better delimiter detection
-            # Keep all data by using keep_default_na=False to prevent auto-conversion of empty strings
+            # Read CSV with all data preserved
+            # Important: keep_default_na=True ensures standard NA values are recognized
+            # on_bad_lines='warn' prevents entire file from failing on malformed lines
             df = pd.read_csv(
                 file_path, 
                 sep=sep, 
                 encoding=enc, 
                 header=header_row, 
-                engine='python',
-                keep_default_na=False,  # Don't auto-convert empty strings to NaN
-                na_values=[''],  # Only treat empty strings as NaN
-                skipinitialspace=True  # Strip spaces after delimiter
+                engine=engine,
+                keep_default_na=True,
+                skipinitialspace=True,  # Strip spaces after delimiter
+                on_bad_lines='warn',  # Warn but continue on bad lines
+                low_memory=False  # Read entire file to infer types correctly
             )
             
-            # Debug: print first few rows info
-            print(f"CSV读取成功: {Path(file_path).name} - {len(df)} 行 x {len(df.columns)} 列, 编码: {enc}")
-            if sep:
-                print(f"使用分隔符: {repr(sep)}")
-            else:
-                print(f"使用自动检测分隔符")
+            # Report success
+            if enc != 'utf-8':
+                print(f"成功使用 {enc} 编码读取CSV: {Path(file_path).name}")
             
             return df
-            
         except Exception as e:
             last_error = e
             continue
@@ -377,7 +269,7 @@ class WorkbookCreateNode(BaseNode):
     node_type = "workbook_create"
     node_name = "创建工作簿(输入)"
     node_category = "灵活合并"
-    node_description = "开始一个新的工作簿，可选从现有文件加载（.xls文件将自动转换以支持样式保留）"
+    node_description = "开始一个新的工作簿，可选从现有文件加载（注意：.xls格式不支持样式保留）"
     node_color = "#22c55e"  # Green
     
     def _setup_ports(self):
@@ -400,15 +292,14 @@ class WorkbookCreateNode(BaseNode):
         
         if base_file and Path(base_file).exists():
             try:
-                # Notify if .xls file is being converted
+                # Warn if .xls file is used
                 if str(base_file).lower().endswith('.xls'):
-                    self.report_progress(f"🔄 自动转换.xls文件以支持样式保留: {Path(base_file).name}")
+                    self.report_progress(f"⚠️ .xls格式不支持样式保留: {Path(base_file).name}")
                 
                 # Read all sheets as DataFrames
                 dfs = pd.read_excel(base_file, sheet_name=None)
                 
                 # Wrap them in StyledSheet to preserve original styles
-                # StyledSheet will automatically convert .xls to .xlsx
                 for sheet_name, df in dfs.items():
                     workbook[sheet_name] = StyledSheet(base_file, sheet_name, df, is_full_copy=True)
                     
@@ -425,7 +316,7 @@ class WorkbookAppendNode(BaseNode):
     node_type = "workbook_append"
     node_name = "追加工作表"
     node_category = "灵活合并"
-    node_description = "从另一个Excel文件读取工作表并添加到当前工作簿（.xls文件将自动转换以支持样式保留）"
+    node_description = "从另一个Excel文件读取工作表并添加到当前工作簿（注意：.xls格式不支持样式保留）"
     node_color = "#8b5cf6"  # Violet
     
     def _setup_ports(self):
@@ -583,15 +474,13 @@ class WorkbookAppendNode(BaseNode):
             is_csv = str(file_path).lower().endswith('.csv')
             is_xls = str(file_path).lower().endswith('.xls')
             
-            # Notify if .xls file is being converted
+            # Warn if .xls file is used
             if is_xls:
-                self.report_progress(f"🔄 自动转换.xls文件以支持样式保留: {Path(file_path).name}")
+                self.report_progress(f"⚠️ .xls格式不支持样式保留: {Path(file_path).name}")
             
             if is_csv:
                 # CSV handling
-                self.report_progress(f"📄 读取CSV文件: {Path(file_path).name}")
                 df = read_csv_with_options(file_path, csv_encoding, csv_delimiter, header_row)
-                self.report_progress(f"✅ CSV读取成功: {len(df)} 行 x {len(df.columns)} 列")
                 
                 default_name = Path(file_path).stem
                 
@@ -682,7 +571,7 @@ class SheetCopyNode(BaseNode):
     node_type = "sheet_copy"
     node_name = "复制/合并数据"
     node_category = "灵活合并"
-    node_description = "将Excel/CSV数据复制到工作簿，支持列映射和空值检查（.xls文件将自动转换以支持样式保留）"
+    node_description = "将Excel/CSV数据复制到工作簿，支持列映射和空值检查（注意：.xls格式不支持样式保留）"
     node_color = "#f59e0b"  # Amber
     
     def _setup_ports(self):
@@ -847,9 +736,8 @@ class SheetCopyNode(BaseNode):
         try:
             is_csv = str(file_path).lower().endswith('.csv')
             if is_csv:
-                self.report_progress(f"📄 读取CSV文件: {Path(file_path).name}")
                 df = read_csv_with_options(file_path, csv_encoding, csv_delimiter, header_row)
-                self.report_progress(f"✅ CSV读取成功: {len(df)} 行 x {len(df.columns)} 列")
+                self.report_progress(f"CSV读取成功: {len(df)}行 x {len(df.columns)}列")
             else:
                 # Excel
                 if not src_sheet_name:
@@ -857,6 +745,7 @@ class SheetCopyNode(BaseNode):
                     df = pd.read_excel(file_path, sheet_name=0, header=header_row)
                 else:
                     df = pd.read_excel(file_path, sheet_name=src_sheet_name, header=header_row)
+                self.report_progress(f"Excel读取成功: {len(df)}行 x {len(df.columns)}列")
         except Exception as e:
             raise ValueError(f"读取来源文件失败: {e}")
             
@@ -864,7 +753,13 @@ class SheetCopyNode(BaseNode):
         try:
             # Strip whitespace from string columns
             if strip_whitespace:
-                df = df.apply(lambda x: x.str.strip() if x.dtype == "object" else x)
+                for col in df.columns:
+                    if df[col].dtype == "object":
+                        try:
+                            df[col] = df[col].str.strip()
+                        except AttributeError:
+                            # Column contains non-string objects, skip
+                            pass
                 # Also strip column names if they are strings
                 df.columns = df.columns.map(lambda x: x.strip() if isinstance(x, str) else x)
                 
@@ -879,24 +774,33 @@ class SheetCopyNode(BaseNode):
             
             # Remove duplicates
             if remove_duplicates:
+                before_count = len(df)
                 df = df.drop_duplicates()
+                after_count = len(df)
+                if before_count != after_count:
+                    self.report_progress(f"去重: 删除了 {before_count - after_count} 个重复行")
 
             # 3. Process Data based on Mode
             if copy_mode == "no_blank":
-                # Remove rows where all elements are NaN or empty strings
-                # For CSV files, empty strings might not be NaN
-                if is_csv:
-                    # Check for both NaN and empty strings
-                    df = df.replace('', pd.NA)  # Convert empty strings to NA
+                # Remove rows where all elements are NaN
+                before_count = len(df)
                 df = df.dropna(how='all')
-                rows_after = len(df)
-                self.report_progress(f"🧹 去除空白行后: {rows_after} 行")
+                after_count = len(df)
+                if before_count != after_count:
+                    self.report_progress(f"删除空行: {before_count - after_count} 行")
                 
             elif copy_mode == "columns":
                 # Parse mapping: "A=B; C=D" or "Name=Name"
+                if not col_mapping_str or not col_mapping_str.strip():
+                    raise ValueError("列映射模式需要指定列映射规则")
+                    
                 mappings = [m.strip() for m in col_mapping_str.split(';') if m.strip()]
                 
+                if not mappings:
+                    raise ValueError("列映射规则为空，请检查格式")
+                
                 new_df = pd.DataFrame()
+                mapped_count = 0
                 
                 for m in mappings:
                     if '=' in m:
@@ -910,21 +814,34 @@ class SheetCopyNode(BaseNode):
                     
                     # Check if src_col exists (by name)
                     if src_col in df.columns:
-                        new_df[tgt_col] = df[src_col]
+                        new_df[tgt_col] = df[src_col].copy()
+                        mapped_count += 1
                     else:
                         # Try by index if integer?
                         if src_col.isdigit() and int(src_col) < len(df.columns):
-                            new_df[tgt_col] = df.iloc[:, int(src_col)]
+                            new_df[tgt_col] = df.iloc[:, int(src_col)].copy()
+                            mapped_count += 1
                         else:
-                            print(f"Warning: Column '{src_col}' not found in source.")
+                            warning_msg = f"⚠️ 列 '{src_col}' 未找到，跳过"
+                            self.report_progress(warning_msg)
                 
+                if mapped_count == 0:
+                    raise ValueError(f"没有成功映射任何列。可用列: {list(df.columns)}")
+                    
+                self.report_progress(f"列映射: 成功映射 {mapped_count}/{len(mappings)} 列")
                 df = new_df
+
+            # Validate final dataframe before writing
+            if df is None or df.empty:
+                raise ValueError(f"处理后的数据为空，请检查过滤条件和列映射设置")
+            
+            self.report_progress(f"准备写入: {len(df)}行 x {len(df.columns)}列 → 工作表 '{target_sheet}'")
 
             # 4. Write to Target
             if preserve_formatting and not is_csv:
-                # Notify if .xls file is being converted
+                # Warn if .xls file is used with style preservation
                 if str(file_path).lower().endswith('.xls'):
-                    self.report_progress(f"🔄 自动转换.xls文件以支持样式保留: {Path(file_path).name}")
+                    self.report_progress(f"⚠️ .xls格式不支持样式保留: {Path(file_path).name}")
                 
                 # Check if this is a full copy (optimization)
                 is_full_copy = (
@@ -950,7 +867,7 @@ class SheetCopyNode(BaseNode):
                     workbook[target_sheet] = StyledSheet(file_path, src_sheet_name, df, header_row, is_full_copy=is_full_copy)
                     
             else:
-                # Standard DataFrame mode (CSV or preserve_formatting=False)
+                # Standard DataFrame mode
                 if target_sheet in workbook and write_mode == "append":
                     target_data = workbook[target_sheet]
                     # If target is StyledSheet, we can't easily append DataFrame to it without breaking style logic
@@ -963,13 +880,13 @@ class SheetCopyNode(BaseNode):
                         target_data = pd.concat(dfs, ignore_index=True)
                     
                     if isinstance(target_data, pd.DataFrame):
-                        original_rows = len(target_data)
-                        workbook[target_sheet] = pd.concat([target_data, df], ignore_index=True)
-                        self.report_progress(f"📊 追加数据: {original_rows} + {len(df)} = {len(workbook[target_sheet])} 行")
+                        combined_df = pd.concat([target_data, df], ignore_index=True)
+                        workbook[target_sheet] = combined_df
+                        self.report_progress(f"追加模式: 合并后共 {len(combined_df)} 行")
                 else:
                     # Overwrite or Create new
                     workbook[target_sheet] = df
-                    self.report_progress(f"📊 写入数据: {len(df)} 行 x {len(df.columns)} 列")
+                    self.report_progress(f"覆盖模式: 已写入 {len(df)} 行到工作表 '{target_sheet}'")
         
         except Exception as e:
             raise ValueError(f"处理文件失败 [{file_path}]: {e}")
@@ -1036,15 +953,6 @@ class WorkbookSaveNode(BaseNode):
                 self._save_standard(output_file, workbook)
         finally:
             self._source_wb_cache = {} # Clear cache
-            
-            # Clean up any temporary converted files
-            for val in workbook.values():
-                if isinstance(val, StyledSheet):
-                    val.cleanup()
-                elif isinstance(val, list):
-                    for item in val:
-                        if isinstance(item, StyledSheet):
-                            item.cleanup()
                 
         return {"file_path": output_file}
 
@@ -1189,10 +1097,9 @@ class WorkbookSaveNode(BaseNode):
     def _copy_styled_sheet(self, styled: StyledSheet, target_ws, start_row):
         """Copy data and styles from StyledSheet to target worksheet"""
         try:
-            # StyledSheet now auto-converts .xls to .xlsx, so we can proceed normally
-            # If conversion failed, file_path will still be .xls and we fall back to data-only copy
+            # Check for .xls file (not supported by openpyxl)
             if str(styled.file_path).lower().endswith('.xls'):
-                warning_msg = f"⚠️ .xls转换失败，仅复制数据: {Path(styled.original_file_path).name}"
+                warning_msg = f"⚠️ .xls格式不支持样式保留，仅复制数据: {Path(styled.file_path).name}"
                 self.report_progress(warning_msg)
                 # Fallback to fast data writing
                 df = styled.df_filtered
