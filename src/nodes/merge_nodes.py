@@ -40,6 +40,37 @@ class StyledSheet:
         self.header_row = header_row
         self.is_full_copy = is_full_copy
 
+def convert_text_to_numeric(df):
+    """
+    Convert text columns that contain numbers to numeric type
+    This fixes the issue where CSV numbers are read as text and can't be used in Excel formulas
+    """
+    converted_cols = []
+    
+    for col in df.columns:
+        if df[col].dtype == 'object':  # Only process text columns
+            try:
+                # Try to convert to numeric
+                # errors='coerce' will turn non-numeric values to NaN
+                numeric_series = pd.to_numeric(df[col], errors='coerce')
+                
+                # Check if conversion was successful for most values
+                # If more than 50% of non-null values were successfully converted, use numeric type
+                non_null_count = df[col].notna().sum()
+                if non_null_count > 0:
+                    converted_count = numeric_series.notna().sum()
+                    conversion_rate = converted_count / non_null_count
+                    
+                    if conversion_rate > 0.5:  # More than 50% are numbers
+                        df[col] = numeric_series
+                        converted_cols.append(col)
+            except:
+                # If conversion fails, keep as text
+                pass
+    
+    return df, converted_cols
+
+
 def read_csv_with_options(file_path, encoding_opt='auto', delimiter_opt='auto', header_row=0):
     """Helper to read CSV with flexible options"""
     
@@ -88,9 +119,14 @@ def read_csv_with_options(file_path, encoding_opt='auto', delimiter_opt='auto', 
                 low_memory=False  # Read entire file to infer types correctly
             )
             
+            # Convert text numbers to numeric type (fixes Excel formula issue)
+            df, converted_cols = convert_text_to_numeric(df)
+            
             # Report success
             if enc != 'utf-8':
                 print(f"成功使用 {enc} 编码读取CSV: {Path(file_path).name}")
+            if converted_cols:
+                print(f"已转换文本数字为数值类型: {', '.join(converted_cols)}")
             
             return df
         except Exception as e:
