@@ -1111,13 +1111,18 @@ class WorkbookSaveNode(BaseNode):
                     target_ws.append(headers)
                     current_row += 1
                 
-                # Convert to list of lists for faster iteration
-                # Using itertuples is faster than iterrows
+                # Performance optimization: Batch write for better speed
+                total_rows = len(item)
+                
+                # For large datasets, report progress less frequently
+                progress_interval = 1000 if total_rows > 5000 else 2000
+                
                 try:
-                    total_rows = len(item)
+                    # Using itertuples is faster than iterrows
                     for row_idx, row in enumerate(item.itertuples(index=False), 1):
-                        if row_idx % 1000 == 0:
-                            self.report_progress(f"写入行 {row_idx}/{total_rows}")
+                        if row_idx % progress_interval == 0:
+                            percentage = int(row_idx/total_rows*100)
+                            self.report_progress(f"⚡ 写入数据: {row_idx}/{total_rows} ({percentage}%)")
                             
                         try:
                             # Sanitize row values
@@ -1165,11 +1170,14 @@ class WorkbookSaveNode(BaseNode):
                         
                         start_row += 1
                     
-                    # Write data rows
+                    # Write data rows - optimized for performance
                     total_rows = len(df)
+                    progress_interval = 1000 if total_rows > 5000 else 2000
+                    
                     for row_idx, row in enumerate(df.itertuples(index=False), 1):
-                        if row_idx % 1000 == 0:
-                            self.report_progress(f"复制 .xls 数据: {row_idx}/{total_rows} 行")
+                        if row_idx % progress_interval == 0:
+                            percentage = int(row_idx/total_rows*100)
+                            self.report_progress(f"⚡ 复制 .xls: {row_idx}/{total_rows} ({percentage}%)")
                         
                         sanitized_row = [sanitize_value(val) for val in row]
                         target_ws.append(sanitized_row)
@@ -1238,24 +1246,26 @@ class WorkbookSaveNode(BaseNode):
             # =================================================================
             # STRATEGY A: Full Copy (Direct OpenPyXL Copy)
             # =================================================================
+            # STRATEGY A: Full Copy (Direct OpenPyXL Copy) - OPTIMIZED
+            # =================================================================
             # If this is a full copy of an Excel file, we should bypass DataFrame iteration
             # to ensure we capture ALL rows (including blank ones) and ALL columns.
             # This fixes issues where Pandas skips blank rows or fails to parse some columns.
             if styled.is_full_copy and not str(styled.file_path).lower().endswith('.csv'):
-                print(f"Using Direct Full Copy Strategy for {styled.sheet_name}")
-                
-                # 1. Copy Header & Pre-Header Rows
-                # Actually, for full copy, we just copy from row 1 to max_row
-                # But we need to respect start_row offset in target
+                self.report_progress(f"⚡ 快速模式: 直接复制工作表 '{styled.sheet_name}'")
                 
                 # Calculate offset
                 # Source Row 1 -> Target Row start_row
                 offset = start_row - 1
                 
                 total_rows = src_ws.max_row
+                
+                # Performance optimization: Report progress less frequently for small files
+                progress_interval = 1000 if total_rows > 5000 else 5000
+                
                 for r in range(1, total_rows + 1):
-                    if r % 1000 == 0:
-                        self.report_progress(f"复制行 {r}/{total_rows}")
+                    if r % progress_interval == 0:
+                        self.report_progress(f"复制行 {r}/{total_rows} ({int(r/total_rows*100)}%)")
                     
                     copy_src_row(r, start_row)
                     start_row += 1
