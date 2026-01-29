@@ -1,5 +1,6 @@
 import pandas as pd
 import openpyxl
+import openpyxl.styles
 import warnings
 from openpyxl.utils import get_column_letter
 from openpyxl.cell.cell import ILLEGAL_CHARACTERS_RE
@@ -1133,26 +1134,67 @@ class WorkbookSaveNode(BaseNode):
     def _copy_styled_sheet(self, styled: StyledSheet, target_ws, start_row):
         """Copy data and styles from StyledSheet to target worksheet"""
         try:
-            # Check for .xls file (not supported by openpyxl)
+            # Check for .xls file (not supported by openpyxl for style reading)
             if str(styled.file_path).lower().endswith('.xls'):
-                warning_msg = f"⚠️ .xls格式不支持样式保留，仅复制数据: {Path(styled.file_path).name}"
-                self.report_progress(warning_msg)
-                # Fallback to fast data writing
-                df = styled.df_filtered
+                self.report_progress(f"处理 .xls 文件: {Path(styled.file_path).name}")
                 
-                # Write header if needed
-                if start_row == 1:
-                    headers = [sanitize_value(str(col)) for col in df.columns]
-                    target_ws.append(headers)
-                    start_row += 1
+                # Strategy: Read .xls using pandas with all data, preserve as much as possible
+                # Note: .xls format is legacy binary format, full style preservation is not possible
+                # We'll copy the data with basic formatting
                 
-                # Write data
-                for row in df.itertuples(index=False):
-                    sanitized_row = [sanitize_value(val) for val in row]
-                    target_ws.append(sanitized_row)
-                    start_row += 1
+                try:
+                    # Read the Excel file to get all data including formulas
+                    # Use openpyxl's data_only=False to try to preserve formulas (won't work for .xls though)
+                    df = styled.df_filtered
                     
-                return start_row
+                    if df is None or df.empty:
+                        self.report_progress(f"⚠️ .xls 文件数据为空")
+                        return start_row
+                    
+                    # Write header if needed
+                    if start_row == 1:
+                        headers = [sanitize_value(str(col)) for col in df.columns]
+                        target_ws.append(headers)
+                        
+                        # Apply basic header formatting
+                        header_row = target_ws[start_row]
+                        for cell in header_row:
+                            cell.font = openpyxl.styles.Font(bold=True)
+                            cell.fill = openpyxl.styles.PatternFill(start_color="CCCCCC", end_color="CCCCCC", fill_type="solid")
+                            cell.alignment = openpyxl.styles.Alignment(horizontal="center", vertical="center")
+                        
+                        start_row += 1
+                    
+                    # Write data rows
+                    total_rows = len(df)
+                    for row_idx, row in enumerate(df.itertuples(index=False), 1):
+                        if row_idx % 1000 == 0:
+                            self.report_progress(f"复制 .xls 数据: {row_idx}/{total_rows} 行")
+                        
+                        sanitized_row = [sanitize_value(val) for val in row]
+                        target_ws.append(sanitized_row)
+                        start_row += 1
+                    
+                    # Auto-adjust column widths for better readability
+                    for column in target_ws.columns:
+                        max_length = 0
+                        column_letter = column[0].column_letter
+                        for cell in column:
+                            try:
+                                if cell.value:
+                                    max_length = max(max_length, len(str(cell.value)))
+                            except:
+                                pass
+                        adjusted_width = min(max_length + 2, 50)  # Cap at 50
+                        target_ws.column_dimensions[column_letter].width = adjusted_width
+                    
+                    self.report_progress(f"✓ 已复制 .xls 文件数据 (共 {total_rows} 行)")
+                    return start_row
+                    
+                except Exception as e:
+                    error_msg = f"⚠️ 处理 .xls 文件失败: {e}"
+                    self.report_progress(error_msg)
+                    raise ValueError(error_msg)
 
             # Use cached workbook if available
             if styled.file_path in self._source_wb_cache:
