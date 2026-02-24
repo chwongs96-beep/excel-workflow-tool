@@ -25,6 +25,34 @@ def sanitize_sheet_name(name):
         name = name.replace(char, '_')
     return name[:31]
 
+def make_unique_sheet_name(name, used_names=None):
+    """Create a unique, Excel-safe sheet name"""
+    if used_names is None:
+        used_names = set()
+
+    base_name = sanitize_sheet_name(name) or "Sheet"
+    candidate = base_name
+    counter = 1
+    while candidate in used_names:
+        suffix = f"_{counter}"
+        candidate = f"{base_name[:31-len(suffix)]}{suffix}"
+        counter += 1
+    return candidate
+
+def read_excel_with_engine(file_path, sheet_name: Any = 0, header: int = 0):
+    """Read Excel with proper engine based on extension"""
+    ext = str(file_path).lower()
+    if ext.endswith('.xls'):
+        return pd.read_excel(file_path, sheet_name=sheet_name, header=header, engine='xlrd')
+    return pd.read_excel(file_path, sheet_name=sheet_name, header=header, engine='openpyxl')
+
+def get_excel_file(file_path):
+    """Create ExcelFile with proper engine based on extension"""
+    ext = str(file_path).lower()
+    if ext.endswith('.xls'):
+        return pd.ExcelFile(file_path, engine='xlrd')
+    return pd.ExcelFile(file_path, engine='openpyxl')
+
 def sanitize_value(value):
     """Remove illegal characters from string values"""
     if isinstance(value, str):
@@ -223,16 +251,16 @@ class MergeExcelFilesNode(BaseNode):
         # Helper to read sheets based on mode
         def read_sheets(file_path):
             if sheet_mode == "all":
-                return pd.read_excel(file_path, sheet_name=None)
+                return read_excel_with_engine(file_path, sheet_name=None, header=0)
             elif sheet_mode == "first":
-                df = pd.read_excel(file_path, sheet_name=0)
+                df = read_excel_with_engine(file_path, sheet_name=0, header=0)
                 return {"Sheet1": df} # Use generic name, will be renamed
             elif sheet_mode == "name":
                 if not target_sheet_name:
                     # Fallback to all if name not specified
-                    return pd.read_excel(file_path, sheet_name=None)
+                    return read_excel_with_engine(file_path, sheet_name=None, header=0)
                 try:
-                    df = pd.read_excel(file_path, sheet_name=target_sheet_name)
+                    df = read_excel_with_engine(file_path, sheet_name=target_sheet_name, header=0)
                     return {target_sheet_name: df}
                 except Exception:
                     print(f"Warning: Sheet '{target_sheet_name}' not found in {file_path}")
@@ -245,7 +273,7 @@ class MergeExcelFilesNode(BaseNode):
             # Let's assume base file is the "template" so we keep all its sheets usually.
             # But if user wants to merge specific sheets from ALL files including base...
             # Let's keep base file intact (all sheets) as it is the "Base".
-            base_dfs = pd.read_excel(base_file, sheet_name=None)
+            base_dfs = read_excel_with_engine(base_file, sheet_name=None, header=0)
         except Exception as e:
             raise ValueError(f"读取基础文件失败: {e}")
             
@@ -334,7 +362,7 @@ class WorkbookCreateNode(BaseNode):
                     self.report_progress(f"⚠️ .xls格式不支持样式保留: {Path(base_file).name}")
                 
                 # Read all sheets as DataFrames
-                dfs = pd.read_excel(base_file, sheet_name=None)
+                dfs = read_excel_with_engine(base_file, sheet_name=None, header=0)
                 
                 # Wrap them in StyledSheet to preserve original styles
                 for sheet_name, df in dfs.items():
@@ -537,7 +565,7 @@ class WorkbookAppendNode(BaseNode):
                 workbook[t_name] = df
                 
             elif sheet_mode == "all":
-                dfs = pd.read_excel(file_path, sheet_name=None)
+                dfs = read_excel_with_engine(file_path, sheet_name=None, header=0)
                 for name, df in dfs.items():
                     # Determine target name
                     if target_name:
@@ -568,14 +596,14 @@ class WorkbookAppendNode(BaseNode):
                 actual_sheet_name = src_sheet_name
                 if sheet_mode == "first":
                     # We need to find the name of the first sheet for StyledSheet
-                    xl = pd.ExcelFile(file_path)
+                    xl = get_excel_file(file_path)
                     actual_sheet_name = xl.sheet_names[0]
-                    df = pd.read_excel(file_path, sheet_name=0)
+                    df = read_excel_with_engine(file_path, sheet_name=0, header=0)
                     default_name = Path(file_path).stem # Use filename as default sheet name
                 else: # name
                     if not src_sheet_name:
                         raise ValueError("未指定源工作表名称")
-                    df = pd.read_excel(file_path, sheet_name=src_sheet_name)
+                    df = read_excel_with_engine(file_path, sheet_name=src_sheet_name, header=0)
                     default_name = src_sheet_name
                     actual_sheet_name = src_sheet_name
                 
@@ -779,9 +807,9 @@ class SheetCopyNode(BaseNode):
                 # Excel
                 if not src_sheet_name:
                     # Default to first sheet if not specified
-                    df = pd.read_excel(file_path, sheet_name=0, header=header_row)
+                    df = read_excel_with_engine(file_path, sheet_name=0, header=header_row)
                 else:
-                    df = pd.read_excel(file_path, sheet_name=src_sheet_name, header=header_row)
+                    df = read_excel_with_engine(file_path, sheet_name=src_sheet_name, header=header_row)
                 self.report_progress(f"Excel读取成功: {len(df)}行 x {len(df.columns)}列")
         except Exception as e:
             raise ValueError(f"读取来源文件失败: {e}")
@@ -996,9 +1024,11 @@ class WorkbookSaveNode(BaseNode):
     def _save_standard(self, output_file, workbook):
         """Save using standard Pandas (no style preservation)"""
         with pd.ExcelWriter(output_file, engine='openpyxl') as writer:
+            used_names = set()
             for sheet_name, df in workbook.items():
                 if isinstance(df, pd.DataFrame):
-                    safe_name = sanitize_sheet_name(sheet_name)
+                    safe_name = make_unique_sheet_name(sheet_name, used_names)
+                    used_names.add(safe_name)
                     # Optional: Sanitize dataframe content if needed, but might be slow
                     # df = df.applymap(sanitize_value) 
                     df.to_excel(writer, sheet_name=safe_name, index=False)
@@ -1018,17 +1048,21 @@ class WorkbookSaveNode(BaseNode):
                 
                 # Track which sheets we have handled (updated or verified as existing)
                 handled_sheets = set()
+                used_names = set(wb.sheetnames)
                 
                 # Update/Add sheets
                 for sheet_name, data in workbook.items():
-                    handled_sheets.add(sheet_name)
+                    safe_name = make_unique_sheet_name(sheet_name, used_names)
+                    used_names.add(safe_name)
+                    handled_sheets.add(safe_name)
                     
                     # Check if this is the original sheet from template (unmodified)
                     is_original = False
                     if isinstance(data, StyledSheet):
                         if (data.file_path == template_file and 
-                            data.sheet_name == sheet_name and 
-                            data.is_full_copy):
+                            sanitize_sheet_name(data.sheet_name) == safe_name and
+                            data.is_full_copy and
+                            safe_name in wb.sheetnames):
                             is_original = True
                     
                     if is_original:
@@ -1037,12 +1071,11 @@ class WorkbookSaveNode(BaseNode):
                     
                     # If we are here, we need to write this sheet.
                     # If it exists in template (but we are overwriting it), remove it first.
-                    if sheet_name in wb.sheetnames:
+                    if safe_name in wb.sheetnames:
                         # Remove existing sheet to overwrite
-                        wb.remove(wb[sheet_name])
+                        wb.remove(wb[safe_name])
                     
                     # Create new sheet
-                    safe_name = sanitize_sheet_name(sheet_name)
                     target_ws = wb.create_sheet(title=safe_name)
                     
                     # Write data
@@ -1069,7 +1102,7 @@ class WorkbookSaveNode(BaseNode):
             wb.remove(wb["Sheet"])
             
         for sheet_name, data in workbook.items():
-            safe_name = sanitize_sheet_name(sheet_name)
+            safe_name = make_unique_sheet_name(sheet_name, set(wb.sheetnames))
             target_ws = wb.create_sheet(title=safe_name)
             self._write_items_to_sheet(data, target_ws)
         
@@ -1218,6 +1251,11 @@ class WorkbookSaveNode(BaseNode):
                 src_ws = src_wb.active
                 
             df = styled.df_filtered
+            if src_ws is None:
+                raise ValueError(f"无法读取来源工作表: {styled.sheet_name or 'active'}")
+            if df is None:
+                raise ValueError("来源数据为空，无法复制")
+
             header_row_idx = styled.header_row + 1 # 1-based
             
             # Check if data is sequential (unfiltered)
