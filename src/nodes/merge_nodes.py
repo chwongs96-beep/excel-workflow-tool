@@ -757,6 +757,12 @@ class SheetCopyNode(BaseNode):
                 "default": "whole"
             },
             {
+                "key": "quick_mode",
+                "label": "⚡ 快速模式(推荐)",
+                "type": "checkbox",
+                "default": False
+            },
+            {
                 "key": "column_mapping",
                 "label": "列映射 (仅指定列模式)",
                 "type": "text",
@@ -806,7 +812,8 @@ class SheetCopyNode(BaseNode):
             return False, "目标工作表名称是必需的"
         
         mode = self.get_param("copy_mode")
-        if mode == "columns" and not self.get_param("column_mapping"):
+        quick_mode = self.get_param("quick_mode", False)
+        if (not quick_mode) and mode == "columns" and not self.get_param("column_mapping"):
             return False, "指定列模式下需要填写列映射"
             
         return True, ""
@@ -829,6 +836,7 @@ class SheetCopyNode(BaseNode):
         copy_mode = self.get_param("copy_mode", "whole")
         write_mode = self.get_param("write_mode", "overwrite")
         col_mapping_str = self.get_param("column_mapping", "")
+        quick_mode = self.get_param("quick_mode", False)
         
         header_row = self.get_param("header_row", 0)
         filter_query = self.get_param("filter_query", "")
@@ -838,6 +846,16 @@ class SheetCopyNode(BaseNode):
         
         csv_delimiter = self.get_param("csv_delimiter", "auto")
         csv_encoding = self.get_param("csv_encoding", "auto")
+
+        # Quick mode: apply fastest safe defaults with one click
+        if quick_mode:
+            copy_mode = "whole"
+            write_mode = "overwrite"
+            filter_query = ""
+            remove_duplicates = False
+            strip_whitespace = False
+            preserve_formatting = False
+            self.report_progress("⚡ 已启用快速模式: 整页复制 + 覆盖写入 + 关闭格式保留/过滤/去重")
         
         # 1. Read Source Data
         try:
