@@ -110,6 +110,18 @@ Run the application:
 python main.py
 ```
 
+Run regression tests (CSV/XLS -> XLSX):
+
+```bash
+python -m unittest tests.test_regression -v
+```
+
+Or on Windows (one click):
+
+```bash
+run_regression_tests.bat
+```
+
 
 ### Creating a Workflow
 
