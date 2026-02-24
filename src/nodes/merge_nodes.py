@@ -60,6 +60,44 @@ def sanitize_value(value):
         return ILLEGAL_CHARACTERS_RE.sub('', value)
     return value
 
+def normalize_excel_value(value):
+    """Normalize values for Excel writing: prefer numeric types over numeric-like text."""
+    value = sanitize_value(value)
+
+    if not isinstance(value, str):
+        return value
+
+    text = value.strip()
+    if text == "":
+        return ""
+
+    # Keep formulas as formulas
+    if text.startswith("="):
+        return text
+
+    # Keep likely identifiers with leading zeros as text (e.g. 00123)
+    if re.fullmatch(r"[+-]?0\d+", text):
+        return text
+
+    # Remove thousand separators for numeric parsing
+    compact = text.replace(",", "")
+
+    # Integer
+    if re.fullmatch(r"[+-]?\d+", compact):
+        try:
+            return int(compact)
+        except Exception:
+            return text
+
+    # Decimal / scientific notation
+    if re.fullmatch(r"[+-]?(\d+\.\d*|\d*\.\d+|\d+)([eE][+-]?\d+)?", compact):
+        try:
+            return float(compact)
+        except Exception:
+            return text
+
+    return text
+
 class StyledSheet:
     """Wrapper to hold sheet info for style-preserved copying"""
     def __init__(self, file_path, sheet_name, df_filtered=None, header_row=0, is_full_copy=False):
@@ -136,17 +174,21 @@ def read_csv_with_options(file_path, encoding_opt='auto', delimiter_opt='auto', 
             # Read CSV with all data preserved
             # Important: keep_default_na=True ensures standard NA values are recognized
             # on_bad_lines='warn' prevents entire file from failing on malformed lines
-            df = pd.read_csv(
-                file_path, 
-                sep=sep, 
-                encoding=enc, 
-                header=header_row, 
-                engine=engine,
-                keep_default_na=True,
-                skipinitialspace=True,  # Strip spaces after delimiter
-                on_bad_lines='warn',  # Warn but continue on bad lines
-                low_memory=False  # Read entire file to infer types correctly
-            )
+            read_kwargs = {
+                "sep": sep,
+                "encoding": enc,
+                "header": header_row,
+                "engine": engine,
+                "keep_default_na": True,
+                "skipinitialspace": True,
+                "on_bad_lines": "warn",
+            }
+
+            # low_memory only supported by C engine
+            if engine == 'c':
+                read_kwargs["low_memory"] = False
+
+            df = pd.read_csv(file_path, **read_kwargs)
             
             # Convert text numbers to numeric type (fixes Excel formula issue)
             df, converted_cols = convert_text_to_numeric(df)
@@ -1159,7 +1201,7 @@ class WorkbookSaveNode(BaseNode):
                             
                         try:
                             # Sanitize row values
-                            sanitized_row = [sanitize_value(val) for val in row]
+                            sanitized_row = [normalize_excel_value(val) for val in row]
                             target_ws.append(sanitized_row)
                             current_row += 1
                         except Exception as e:
@@ -1212,7 +1254,7 @@ class WorkbookSaveNode(BaseNode):
                             percentage = int(row_idx/total_rows*100)
                             self.report_progress(f"⚡ 复制 .xls: {row_idx}/{total_rows} ({percentage}%)")
                         
-                        sanitized_row = [sanitize_value(val) for val in row]
+                        sanitized_row = [normalize_excel_value(val) for val in row]
                         target_ws.append(sanitized_row)
                         start_row += 1
                     
@@ -1272,7 +1314,7 @@ class WorkbookSaveNode(BaseNode):
                     src_cell = src_ws.cell(row=s_row, column=col)
                     tgt_cell = target_ws.cell(row=t_row, column=col)
                     
-                    tgt_cell.value = sanitize_value(src_cell.value)
+                    tgt_cell.value = normalize_excel_value(src_cell.value)
                     if src_cell.has_style:
                         tgt_cell.font = copy_obj(src_cell.font)
                         tgt_cell.border = copy_obj(src_cell.border)
@@ -1347,7 +1389,7 @@ class WorkbookSaveNode(BaseNode):
                     src_cell = src_ws.cell(row=header_row_idx, column=col)
                     tgt_cell = target_ws.cell(row=start_row, column=col)
                     
-                    tgt_cell.value = sanitize_value(src_cell.value)
+                    tgt_cell.value = normalize_excel_value(src_cell.value)
                     if src_cell.has_style:
                         tgt_cell.font = copy_obj(src_cell.font)
                         tgt_cell.border = copy_obj(src_cell.border)
@@ -1379,6 +1421,8 @@ class WorkbookSaveNode(BaseNode):
             # 2. Copy Data Rows
             total_rows = len(df)
             last_src_row = header_row_idx # Track last processed source row
+            data_target_start = start_row
+            data_source_start = header_row_idx + 1
             
             for idx, row_data in df.iterrows():
                 # Progress logging for large files
@@ -1406,7 +1450,7 @@ class WorkbookSaveNode(BaseNode):
                                 src_cell = src_ws.cell(row=src_row_idx, column=tgt_col_idx)
                         
                         tgt_cell = target_ws.cell(row=start_row, column=tgt_col_idx)
-                        tgt_cell.value = sanitize_value(value)
+                        tgt_cell.value = normalize_excel_value(value)
                         
                         if src_cell and src_cell.has_style:
                             tgt_cell.font = copy_obj(src_cell.font)
@@ -1434,82 +1478,33 @@ class WorkbookSaveNode(BaseNode):
 
             # 4. Copy Merged Cells in Data Area (Only if sequential/unfiltered)
             if is_sequential:
-                # Calculate offset between source data start and target data start
-                # Source data starts at: header_row_idx + 1
-                # Target data started at: (original start_row passed to func) + 1 (if header copied)
-                # Current start_row is at the end.
-                
-                # Let's recalculate target data start row
-                # If we copied header, target data started at (original_start_row + 1)
-                # If we didn't, target data started at original_start_row
-                
-                # We can just iterate ranges and check if they are in data area
+                # Source data block copied from DataFrame rows
+                source_data_end = data_source_start + total_rows - 1
+                # Mapping: source row -> target row by fixed offset
+                offset = data_target_start - data_source_start
+
                 for range_ in src_ws.merged_cells.ranges:
-                    if range_.min_row > header_row_idx:
-                        # This is a data area merge
-                        
-                        # Calculate offset
-                        # Source row R maps to Target row R'
-                        # R' = R - (header_row_idx + 1) + target_data_start_row
-                        
-                        # Wait, simpler:
-                        # We know we wrote `len(df)` rows.
-                        # The data block in source is `header_row_idx + 1` to `header_row_idx + len(df)`
-                        # The data block in target is `target_data_start` to `target_data_start + len(df) - 1`
-                        
-                        # Let's find target_data_start
-                        # It is `start_row - len(df)` (since start_row was incremented in loop)
-                        # BUT if we added post-data rows, start_row is even further.
-                        # We need to be careful.
-                        
-                        # Actually, if is_full_copy is True, the offset is constant for the whole block.
-                        # Offset = (Target Header Row) - (Source Header Row)
-                        # Target Header Row was `start_row` at the beginning of this function (if header copied)
-                        # Wait, start_row changes.
-                        pass
-                
-                # Simplified Merge Cell Logic for Full Copy
-                if styled.is_full_copy:
-                     # If full copy, we copied everything sequentially.
-                     # We can just copy all merged cells that weren't handled in header section
-                     # Offset is determined by the shift of the header row.
-                     # Target Header Row index: start_row - (total_rows + post_data_rows) - 1? No.
-                     
-                     # Let's rely on the fact that we copied header to `start_row` (initial).
-                     # So offset = initial_start_row - header_row_idx.
-                     # But we don't have initial_start_row anymore.
-                     # We can deduce it.
-                     # Current start_row = initial_start_row + (pre_header) + 1 (header) + total_rows + post_data
-                     
-                     # Actually, the previous logic for data area merge was:
-                     # offset = target_data_start - (header_row_idx + 1)
-                     # target_data_start is where the first data row was written.
-                     # That is `start_row` BEFORE the data loop.
-                     # Which is `start_row` AFTER header loop.
-                     
-                     # Let's just use the existing logic but extend it to cover post-data rows?
-                     # The existing logic iterates ALL ranges and checks `min_row > header_row_idx`.
-                     # This covers data AND post-data rows if the offset is correct.
-                     
-                     # We need `target_data_start`.
-                     # It is `start_row` - (rows written in post-data) - (rows written in data).
-                     rows_written_post = src_ws.max_row - last_src_row if last_src_row < src_ws.max_row else 0
-                     rows_written_data = len(df)
-                     
-                     target_data_start = start_row - rows_written_post - rows_written_data
-                     
-                     offset = target_data_start - (header_row_idx + 1)
-                     
-                     for range_ in src_ws.merged_cells.ranges:
-                        if range_.min_row > header_row_idx:
-                            min_row = range_.min_row + offset
-                            max_row = range_.max_row + offset
-                            
-                            try:
-                                target_ws.merge_cells(start_row=min_row, start_column=range_.min_col,
-                                                    end_row=max_row, end_column=range_.max_col)
-                            except Exception as e:
-                                print(f"Warning: Failed to merge cells {range_}: {e}")
+                    # Skip header/pre-header merges; handled above
+                    if range_.max_row <= header_row_idx:
+                        continue
+
+                    # For non-full copy, only keep merges fully inside copied data block
+                    if not styled.is_full_copy:
+                        if range_.min_row < data_source_start or range_.max_row > source_data_end:
+                            continue
+
+                    min_row = range_.min_row + offset
+                    max_row = range_.max_row + offset
+
+                    try:
+                        target_ws.merge_cells(
+                            start_row=min_row,
+                            start_column=range_.min_col,
+                            end_row=max_row,
+                            end_column=range_.max_col
+                        )
+                    except Exception as e:
+                        print(f"Warning: Failed to merge cells {range_}: {e}")
 
             return start_row
             

@@ -16,13 +16,16 @@ class TestCsvXlsToXlsxRegression(unittest.TestCase):
 
         self.csv_path = self.base / "sample.csv"
         self.xls_path = self.base / "sample.xls"
+        self.xlsx_merged_path = self.base / "sample_merged.xlsx"
 
         self.out_csv_xlsx = self.base / "out_from_csv.xlsx"
         self.out_xls_xlsx = self.base / "out_from_xls.xlsx"
         self.out_sheet_copy_xlsx = self.base / "out_sheet_copy.xlsx"
+        self.out_merged_xlsx = self.base / "out_merged_copy.xlsx"
 
         self._build_csv()
         self._build_xls()
+        self._build_xlsx_with_merged_cells()
 
     def tearDown(self):
         self.temp_dir.cleanup()
@@ -53,6 +56,27 @@ class TestCsvXlsToXlsxRegression(unittest.TestCase):
         sh2.write(1, 1, "ok")
 
         wb.save(str(self.xls_path))
+
+    def _build_xlsx_with_merged_cells(self):
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = "MergeSrc"
+
+        ws["A1"] = "Merged Header"
+        ws.merge_cells("A1:C1")
+
+        ws["A2"] = "Item"
+        ws["B2"] = "Amount"
+        ws["C2"] = "Qty"
+
+        ws["A3"] = "Group-1"
+        ws.merge_cells("A3:A4")
+        ws["B3"] = 100
+        ws["C3"] = 2
+        ws["B4"] = 250
+        ws["C4"] = 3
+
+        wb.save(self.xlsx_merged_path)
 
     def test_csv_append_then_save_xlsx(self):
         creator = WorkbookCreateNode("c1")
@@ -129,6 +153,39 @@ class TestCsvXlsToXlsxRegression(unittest.TestCase):
         ws = out_wb["TARGET"]
         self.assertGreaterEqual(ws.max_row, 4)
         self.assertIsInstance(ws["B2"].value, (int, float))
+
+    def test_sheet_copy_preserves_merged_cells_from_xlsx(self):
+        creator = WorkbookCreateNode("c4")
+        workbook = creator.execute({})["workbook"]
+
+        copy_node = SheetCopyNode("sc2")
+        copy_node.set_param("file_path", str(self.xlsx_merged_path))
+        copy_node.set_param("sheet_name", "MergeSrc")
+        copy_node.set_param("target_sheet", "MERGED_OUT")
+        copy_node.set_param("copy_mode", "whole")
+        copy_node.set_param("write_mode", "overwrite")
+        copy_node.set_param("column_mapping", "")
+        copy_node.set_param("header_row", 0)
+        copy_node.set_param("filter_query", "")
+        copy_node.set_param("remove_duplicates", False)
+        copy_node.set_param("strip_whitespace", False)
+        copy_node.set_param("preserve_formatting", True)
+        copy_node.set_param("csv_delimiter", "auto")
+        copy_node.set_param("csv_encoding", "auto")
+
+        workbook = copy_node.execute({"workbook": workbook})["workbook"]
+
+        saver = WorkbookSaveNode("s4")
+        saver.set_param("output_file", str(self.out_merged_xlsx))
+        saver.execute({"workbook": workbook})
+
+        out_wb = openpyxl.load_workbook(self.out_merged_xlsx, data_only=False)
+        self.assertIn("MERGED_OUT", out_wb.sheetnames)
+        ws = out_wb["MERGED_OUT"]
+
+        merged_ranges = {str(rng) for rng in ws.merged_cells.ranges}
+        self.assertIn("A1:C1", merged_ranges)
+        self.assertIn("A3:A4", merged_ranges)
 
 
 if __name__ == "__main__":
