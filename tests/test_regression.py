@@ -170,6 +170,7 @@ class TestCsvXlsToXlsxRegression(unittest.TestCase):
         copy_node.set_param("remove_duplicates", False)
         copy_node.set_param("strip_whitespace", False)
         copy_node.set_param("preserve_formatting", True)
+        copy_node.set_param("quick_mode", False)
         copy_node.set_param("csv_delimiter", "auto")
         copy_node.set_param("csv_encoding", "auto")
 

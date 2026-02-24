@@ -760,7 +760,7 @@ class SheetCopyNode(BaseNode):
                 "key": "quick_mode",
                 "label": "⚡ 快速模式(推荐)",
                 "type": "checkbox",
-                "default": False
+                "default": True
             },
             {
                 "key": "column_mapping",
@@ -812,7 +812,7 @@ class SheetCopyNode(BaseNode):
             return False, "目标工作表名称是必需的"
         
         mode = self.get_param("copy_mode")
-        quick_mode = self.get_param("quick_mode", False)
+        quick_mode = self.get_param("quick_mode", True)
         if (not quick_mode) and mode == "columns" and not self.get_param("column_mapping"):
             return False, "指定列模式下需要填写列映射"
             
@@ -836,7 +836,7 @@ class SheetCopyNode(BaseNode):
         copy_mode = self.get_param("copy_mode", "whole")
         write_mode = self.get_param("write_mode", "overwrite")
         col_mapping_str = self.get_param("column_mapping", "")
-        quick_mode = self.get_param("quick_mode", False)
+        quick_mode = self.get_param("quick_mode", True)
         
         header_row = self.get_param("header_row", 0)
         filter_query = self.get_param("filter_query", "")
