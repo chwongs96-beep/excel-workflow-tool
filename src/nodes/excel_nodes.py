@@ -99,18 +99,22 @@ class ConvertToXlsxNode(BaseNode):
         ]
 
     def validate(self) -> tuple[bool, str]:
-        file_path = self.get_param("file_path", "")
         output_file = self.get_param("output_file", "")
-        if not file_path:
-            return False, "来源文件是必需的"
-        if not Path(file_path).exists():
-            return False, f"文件不存在: {file_path}"
         if not output_file:
             return False, "输出XLSX路径是必需的"
+        # file_path can come from upstream connection, so only validate if configured
+        file_path = self.get_param("file_path", "")
+        if file_path and not Path(file_path).exists():
+            return False, f"文件不存在: {file_path}"
         return True, ""
 
     def execute(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
-        file_path = input_data.get("file_path") or self.get_param("file_path")
+        file_path = input_data.get("file_path")
+        if not isinstance(file_path, str):
+            file_path = self.get_param("file_path")
+        if not file_path:
+            raise ValueError("未指定来源文件（请配置参数或连接上游节点）")
+
         output_file = self.get_param("output_file")
         sheet_name = self.get_param("sheet_name", "Sheet1")
         header_row = self.get_param("header_row", 0)
@@ -122,9 +126,16 @@ class ConvertToXlsxNode(BaseNode):
             output_file = str(output_file) + '.xlsx'
 
         lower_path = str(file_path).lower()
+
+        # XLSX passthrough: copy to output path so downstream always gets the output file
         if lower_path.endswith('.xlsx') and not rebuild_xlsx:
-            self.report_progress(f"输入已是XLSX，直接透传: {file_path}")
-            return {"file_path": str(file_path)}
+            import shutil
+            if str(Path(file_path).resolve()) != str(Path(output_file).resolve()):
+                shutil.copy2(file_path, output_file)
+                self.report_progress(f"输入已是XLSX，已复制到输出路径: {output_file}")
+            else:
+                self.report_progress(f"输入已是XLSX，路径相同，跳过复制")
+            return {"file_path": output_file}
 
         self.report_progress(f"开始转换为XLSX: {Path(file_path).name}")
 
