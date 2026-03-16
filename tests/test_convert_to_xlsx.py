@@ -7,6 +7,7 @@ import openpyxl
 import xlwt
 
 from src.nodes.excel_nodes import ConvertToXlsxNode
+from src.nodes.merge_nodes import WorkbookCreateNode, SheetCopyNode, WorkbookSaveNode
 
 
 class TestConvertToXlsxNode(unittest.TestCase):
@@ -75,6 +76,49 @@ class TestConvertToXlsxNode(unittest.TestCase):
         self.assertIsInstance(ws["B2"].value, (int, float))
         self.assertIsInstance(ws["B3"].value, (int, float))
         self.assertEqual(ws["C2"].value, "001")
+
+    def test_convert_csv_then_copy_to_target_xlsx(self):
+        convert_node = ConvertToXlsxNode("convert_chain")
+        convert_node.set_param("file_path", str(self.csv_path))
+        convert_node.set_param("output_file", str(self.csv_out))
+        convert_node.set_param("sheet_name", "Data")
+        convert_node.set_param("header_row", 0)
+        convert_node.set_param("csv_delimiter", "comma")
+        convert_node.set_param("csv_encoding", "utf-8-sig")
+        convert_result = convert_node.execute({})
+
+        creator = WorkbookCreateNode("create_chain")
+        workbook = creator.execute({})["workbook"]
+
+        copy_node = SheetCopyNode("copy_chain")
+        copy_node.set_param("file_path", convert_result["file_path"])
+        copy_node.set_param("sheet_name", "Data")
+        copy_node.set_param("target_sheet", "OUT")
+        copy_node.set_param("copy_mode", "whole")
+        copy_node.set_param("quick_mode", False)
+        copy_node.set_param("write_mode", "overwrite")
+        copy_node.set_param("column_mapping", "")
+        copy_node.set_param("header_row", 0)
+        copy_node.set_param("filter_query", "")
+        copy_node.set_param("remove_duplicates", False)
+        copy_node.set_param("strip_whitespace", False)
+        copy_node.set_param("preserve_formatting", True)
+        workbook = copy_node.execute({"workbook": workbook})["workbook"]
+
+        target_xlsx = self.base / "target.xlsx"
+        saver = WorkbookSaveNode("save_chain")
+        saver.set_param("output_file", str(target_xlsx))
+        save_result = saver.execute({"workbook": workbook})
+
+        wb = openpyxl.load_workbook(save_result["file_path"], data_only=False)
+        ws = wb["OUT"]
+
+        self.assertTrue(Path(convert_result["file_path"]).exists())
+        self.assertTrue(Path(save_result["file_path"]).exists())
+        self.assertIn("OUT", wb.sheetnames)
+        self.assertIsInstance(ws["B2"].value, (int, float))
+        self.assertIsInstance(ws["C2"].value, (int, float))
+        self.assertEqual(ws["D2"].value, "00123")
 
 
 if __name__ == "__main__":
