@@ -144,7 +144,9 @@ class ConvertToXlsxNode(BaseNode):
             df = normalize_dataframe_for_excel(df)
             with pd.ExcelWriter(output_file, engine='openpyxl') as writer:
                 df.to_excel(writer, sheet_name=sheet_name, index=False)
+            self._verify_conversion(output_file, sheet_name, df)
         else:
+            source_dfs = {}
             with pd.ExcelFile(file_path, engine='xlrd' if lower_path.endswith('.xls') else 'openpyxl') as excel_file:
                 workbook = openpyxl.Workbook()
                 default_sheet = workbook.active
@@ -153,15 +155,66 @@ class ConvertToXlsxNode(BaseNode):
                 for source_sheet in excel_file.sheet_names:
                     df = read_tabular_file(file_path, sheet_name=source_sheet, header_row=header_row)
                     df = normalize_dataframe_for_excel(df)
-                    ws = workbook.create_sheet(title=str(source_sheet)[:31] or "Sheet1")
+                    safe_title = str(source_sheet)[:31] or "Sheet1"
+                    ws = workbook.create_sheet(title=safe_title)
                     ws.append([str(col) for col in df.columns])
                     for row in df.itertuples(index=False):
                         ws.append([normalize_excel_value(val) for val in row])
+                    source_dfs[safe_title] = df
 
                 workbook.save(output_file)
 
+            for sname, sdf in source_dfs.items():
+                self._verify_conversion(output_file, sname, sdf)
+
         self.report_progress(f"转换完成: {output_file}")
         return {"file_path": output_file}
+
+    def _verify_conversion(self, output_file: str, sheet_name: str, source_df: pd.DataFrame):
+        """Read back the output XLSX and verify row/column counts and spot-check values."""
+        try:
+            result_df = pd.read_excel(output_file, sheet_name=sheet_name, engine='openpyxl', dtype=object)
+        except Exception as e:
+            raise ValueError(f"验证失败: 无法读回输出文件 '{sheet_name}': {e}")
+
+        src_rows, src_cols = source_df.shape
+        out_rows, out_cols = result_df.shape
+
+        if out_rows != src_rows:
+            raise ValueError(
+                f"验证失败 [{sheet_name}]: 行数不一致 — 源 {src_rows} 行, 输出 {out_rows} 行"
+            )
+        if out_cols != src_cols:
+            raise ValueError(
+                f"验证失败 [{sheet_name}]: 列数不一致 — 源 {src_cols} 列, 输出 {out_cols} 列"
+            )
+
+        # Spot-check: first row, last row, and a middle row
+        check_indices = {0}
+        if src_rows > 1:
+            check_indices.add(src_rows - 1)
+        if src_rows > 2:
+            check_indices.add(src_rows // 2)
+
+        mismatches = []
+        for idx in sorted(check_indices):
+            for col_pos in range(src_cols):
+                src_val = source_df.iat[idx, col_pos]
+                out_val = result_df.iat[idx, col_pos]
+                # Normalize both to string for comparison (handles NaN, int/float differences)
+                src_str = "" if pd.isna(src_val) else str(src_val).strip()
+                out_str = "" if pd.isna(out_val) else str(out_val).strip()
+                if src_str != out_str:
+                    col_name = source_df.columns[col_pos]
+                    mismatches.append(
+                        f"  行{idx + 1} 列'{col_name}': 源='{src_str}' → 输出='{out_str}'"
+                    )
+
+        if mismatches:
+            detail = "\n".join(mismatches[:10])
+            self.report_progress(f"⚠️ [{sheet_name}] 抽检发现 {len(mismatches)} 处值差异:\n{detail}")
+        else:
+            self.report_progress(f"✓ [{sheet_name}] 验证通过: {src_rows}行 × {src_cols}列, 抽检一致")
 
 
 @register_node
