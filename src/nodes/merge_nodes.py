@@ -1,102 +1,31 @@
-import pandas as pd
-import openpyxl
-import openpyxl.styles
+import shutil
 import warnings
-from openpyxl.utils import get_column_letter
-from openpyxl.cell.cell import ILLEGAL_CHARACTERS_RE
 from copy import copy as copy_obj
 from pathlib import Path
 from typing import Any, Dict, List, Union
+
+import openpyxl
+import openpyxl.styles
+import pandas as pd
+from openpyxl.utils import get_column_letter
+
 from .base_node import BaseNode
 from .node_registry import register_node
-import re
-
-import shutil
+from .utils import (
+    convert_text_to_numeric,
+    get_excel_file,
+    make_unique_sheet_name,
+    normalize_excel_value,
+    read_csv_with_options,
+    read_excel_with_engine,
+    sanitize_sheet_name,
+    sanitize_value,
+)
 
 # Suppress warnings from pandas and openpyxl
 warnings.filterwarnings('ignore', category=UserWarning)
 warnings.filterwarnings('ignore', category=FutureWarning)
 
-def sanitize_sheet_name(name):
-    """Sanitize sheet name to be compatible with Excel"""
-    name = str(name)
-    invalid_chars = ['\\', '/', '?', '*', ':', '[', ']']
-    for char in invalid_chars:
-        name = name.replace(char, '_')
-    return name[:31]
-
-def make_unique_sheet_name(name, used_names=None):
-    """Create a unique, Excel-safe sheet name"""
-    if used_names is None:
-        used_names = set()
-
-    base_name = sanitize_sheet_name(name) or "Sheet"
-    candidate = base_name
-    counter = 1
-    while candidate in used_names:
-        suffix = f"_{counter}"
-        candidate = f"{base_name[:31-len(suffix)]}{suffix}"
-        counter += 1
-    return candidate
-
-def read_excel_with_engine(file_path, sheet_name: Any = 0, header: int = 0):
-    """Read Excel with proper engine based on extension"""
-    ext = str(file_path).lower()
-    if ext.endswith('.xls'):
-        return pd.read_excel(file_path, sheet_name=sheet_name, header=header, engine='xlrd')
-    return pd.read_excel(file_path, sheet_name=sheet_name, header=header, engine='openpyxl')
-
-def get_excel_file(file_path):
-    """Create ExcelFile with proper engine based on extension"""
-    ext = str(file_path).lower()
-    if ext.endswith('.xls'):
-        return pd.ExcelFile(file_path, engine='xlrd')
-    return pd.ExcelFile(file_path, engine='openpyxl')
-
-def sanitize_value(value):
-    """Remove illegal characters from string values"""
-    if isinstance(value, str):
-        # Use openpyxl's regex for illegal characters
-        return ILLEGAL_CHARACTERS_RE.sub('', value)
-    return value
-
-def normalize_excel_value(value):
-    """Normalize values for Excel writing: prefer numeric types over numeric-like text."""
-    value = sanitize_value(value)
-
-    if not isinstance(value, str):
-        return value
-
-    text = value.strip()
-    if text == "":
-        return ""
-
-    # Keep formulas as formulas
-    if text.startswith("="):
-        return text
-
-    # Keep likely identifiers with leading zeros as text (e.g. 00123)
-    if re.fullmatch(r"[+-]?0\d+", text):
-        return text
-
-    # Remove thousand separators for numeric parsing
-    compact = text.replace(",", "")
-
-    # Integer
-    if re.fullmatch(r"[+-]?\d+", compact):
-        try:
-            return int(compact)
-        except Exception:
-            return text
-
-    # Decimal / scientific notation
-    if re.fullmatch(r"[+-]?(\d+\.\d*|\d*\.\d+|\d+)([eE][+-]?\d+)?", compact):
-        try:
-            return float(compact)
-        except Exception:
-            return text
-
-    return text
 
 class StyledSheet:
     """Wrapper to hold sheet info for style-preserved copying"""
@@ -107,104 +36,6 @@ class StyledSheet:
         self.header_row = header_row
         self.is_full_copy = is_full_copy
 
-def convert_text_to_numeric(df):
-    """
-    Convert text columns that contain numbers to numeric type
-    This fixes the issue where CSV numbers are read as text and can't be used in Excel formulas
-    """
-    converted_cols = []
-    
-    for col in df.columns:
-        if df[col].dtype == 'object':  # Only process text columns
-            try:
-                # Try to convert to numeric
-                # errors='coerce' will turn non-numeric values to NaN
-                numeric_series = pd.to_numeric(df[col], errors='coerce')
-                
-                # Check if conversion was successful for most values
-                # If more than 50% of non-null values were successfully converted, use numeric type
-                non_null_count = df[col].notna().sum()
-                if non_null_count > 0:
-                    converted_count = numeric_series.notna().sum()
-                    conversion_rate = converted_count / non_null_count
-                    
-                    if conversion_rate > 0.5:  # More than 50% are numbers
-                        df[col] = numeric_series
-                        converted_cols.append(col)
-            except:
-                # If conversion fails, keep as text
-                pass
-    
-    return df, converted_cols
-
-
-def read_csv_with_options(file_path, encoding_opt='auto', delimiter_opt='auto', header_row=0):
-    """Helper to read CSV with flexible options"""
-    
-    # Determine delimiter
-    sep = None # Auto-detect
-    engine = 'python'  # Default to python for auto-detection
-    
-    if delimiter_opt == 'comma': 
-        sep = ','
-        engine = 'c'  # Use faster C engine for known delimiters
-    elif delimiter_opt == 'tab': 
-        sep = '\t'
-        engine = 'c'
-    elif delimiter_opt == 'semicolon': 
-        sep = ';'
-        engine = 'c'
-    elif delimiter_opt == 'pipe': 
-        sep = '|'
-        engine = 'python'  # Python engine handles special chars better
-    elif delimiter_opt == 'space': 
-        sep = r'\s+'
-        engine = 'python'  # Regex requires python engine
-    
-    # Determine encoding list
-    encodings = []
-    if encoding_opt and encoding_opt != 'auto':
-        encodings = [encoding_opt]
-    else:
-        encodings = ['utf-8', 'gbk', 'utf-8-sig', 'gb18030', 'latin1']
-        
-    last_error = None
-    for enc in encodings:
-        try:
-            # Read CSV with all data preserved
-            # Important: keep_default_na=True ensures standard NA values are recognized
-            # on_bad_lines='warn' prevents entire file from failing on malformed lines
-            read_kwargs = {
-                "sep": sep,
-                "encoding": enc,
-                "header": header_row,
-                "engine": engine,
-                "keep_default_na": True,
-                "skipinitialspace": True,
-                "on_bad_lines": "warn",
-            }
-
-            # low_memory only supported by C engine
-            if engine == 'c':
-                read_kwargs["low_memory"] = False
-
-            df = pd.read_csv(file_path, **read_kwargs)
-            
-            # Convert text numbers to numeric type (fixes Excel formula issue)
-            df, converted_cols = convert_text_to_numeric(df)
-            
-            # Report success
-            if enc != 'utf-8':
-                print(f"成功使用 {enc} 编码读取CSV: {Path(file_path).name}")
-            if converted_cols:
-                print(f"已转换文本数字为数值类型: {', '.join(converted_cols)}")
-            
-            return df
-        except Exception as e:
-            last_error = e
-            continue
-            
-    raise ValueError(f"无法读取CSV文件 (尝试了编码: {encodings}): {last_error}")
 
 # ============================================================================
 # 批量合并节点 (Batch Merge)
@@ -1077,7 +908,13 @@ class WorkbookSaveNode(BaseNode):
             else:
                 self._save_standard(output_file, workbook)
         finally:
-            self._source_wb_cache = {} # Clear cache
+            # Close cached openpyxl workbooks to release file handles
+            for wb in self._source_wb_cache.values():
+                try:
+                    wb.close()
+                except Exception:
+                    pass
+            self._source_wb_cache = {}
                 
         return {"file_path": output_file}
 
@@ -1284,7 +1121,7 @@ class WorkbookSaveNode(BaseNode):
                             try:
                                 if cell.value:
                                     max_length = max(max_length, len(str(cell.value)))
-                            except:
+                            except (TypeError, ValueError):
                                 pass
                         adjusted_width = min(max_length + 2, 50)  # Cap at 50
                         target_ws.column_dimensions[column_letter].width = adjusted_width
@@ -1442,30 +1279,23 @@ class WorkbookSaveNode(BaseNode):
             data_target_start = start_row
             data_source_start = header_row_idx + 1
             
-            for idx, row_data in df.iterrows():
+            col_names = list(df.columns)
+            for row_num, row_tuple in enumerate(df.itertuples(index=False)):
                 # Progress logging for large files
-                if idx % 100 == 0:
-                    self.report_progress(f"处理行 {idx}/{total_rows}")
-                    print(f"Processing row {idx}/{total_rows}...")
+                if row_num % 500 == 0:
+                    self.report_progress(f"处理行 {row_num}/{total_rows}")
                     
                 try:
-                    if isinstance(idx, int):
-                        src_row_idx = header_row_idx + 1 + idx
-                        last_src_row = src_row_idx
-                    else:
-                        src_row_idx = None
+                    src_row_idx = header_row_idx + 1 + row_num
+                    last_src_row = src_row_idx
                     
-                    for col_pos, (col_name, value) in enumerate(row_data.items()):
+                    for col_pos, value in enumerate(row_tuple):
                         tgt_col_idx = col_pos + 1
                         
                         # Try to find source cell for style
                         src_cell = None
-                        if src_row_idx:
-                            # Assuming 1:1 column mapping for simplicity in style copying
-                            # If columns were reordered, this might pick wrong style source column
-                            # But usually acceptable for "Whole" copy mode
-                            if tgt_col_idx <= src_ws.max_column:
-                                src_cell = src_ws.cell(row=src_row_idx, column=tgt_col_idx)
+                        if tgt_col_idx <= src_ws.max_column:
+                            src_cell = src_ws.cell(row=src_row_idx, column=tgt_col_idx)
                         
                         tgt_cell = target_ws.cell(row=start_row, column=tgt_col_idx)
                         tgt_cell.value = normalize_excel_value(value)
@@ -1479,12 +1309,12 @@ class WorkbookSaveNode(BaseNode):
                             tgt_cell.alignment = copy_obj(src_cell.alignment)
                     
                     # Copy row dimensions
-                    if src_row_idx and src_row_idx in src_ws.row_dimensions:
+                    if src_row_idx in src_ws.row_dimensions:
                         target_ws.row_dimensions[start_row] = copy_obj(src_ws.row_dimensions[src_row_idx])
                     
                     start_row += 1
                 except Exception as e:
-                    raise ValueError(f"复制带格式数据失败，位置: 第 {idx} 行 (源文件行号: {src_row_idx if src_row_idx else '未知'}). 错误: {e}")
+                    raise ValueError(f"复制带格式数据失败，位置: 第 {row_num} 行 (源文件行号: {src_row_idx}). 错误: {e}")
             
             # 3. Post-Data Rows (Only for full copy)
             # This handles empty rows at the end that Pandas skipped but have formatting

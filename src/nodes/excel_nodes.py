@@ -2,110 +2,23 @@
 Excel-related nodes for reading, writing, and processing Excel files
 """
 
-import pandas as pd
 import warnings
-import re
 from pathlib import Path
 from typing import Any, Dict, List
+
 import openpyxl
+import pandas as pd
+
 from .base_node import BaseNode
 from .node_registry import register_node
+from .utils import (
+    normalize_excel_value,
+    normalize_dataframe_for_excel,
+    read_tabular_file,
+)
 
 # Suppress openpyxl warnings
 warnings.filterwarnings('ignore', category=UserWarning, module='openpyxl')
-
-
-def normalize_excel_value(value: Any) -> Any:
-    """Normalize values before writing to Excel so numeric-looking text becomes numbers."""
-    if not isinstance(value, str):
-        return value
-
-    text = value.strip()
-    if text == "":
-        return ""
-
-    if text.startswith("="):
-        return text
-
-    # Keep likely identifiers with leading zeros as text.
-    if re.fullmatch(r"[+-]?0\d+", text):
-        return text
-
-    compact = text.replace(",", "")
-
-    if re.fullmatch(r"[+-]?\d+", compact):
-        try:
-            return int(compact)
-        except Exception:
-            return text
-
-    if re.fullmatch(r"[+-]?(\d+\.\d*|\d*\.\d+|\d+)([eE][+-]?\d+)?", compact):
-        try:
-            return float(compact)
-        except Exception:
-            return text
-
-    return text
-
-
-def normalize_dataframe_for_excel(df: pd.DataFrame) -> pd.DataFrame:
-    """Convert numeric-like text cells to numeric values before XLSX export."""
-    normalized = df.copy()
-    for col in normalized.columns:
-        normalized[col] = normalized[col].map(normalize_excel_value)
-    return normalized
-
-
-def read_tabular_file(file_path: str, sheet_name: Any = 0, header_row: int = 0, csv_encoding: str = "auto", csv_delimiter: str = "auto"):
-    """Read CSV/XLS/XLSX with the proper engine and options."""
-    lower_path = str(file_path).lower()
-
-    if lower_path.endswith('.csv'):
-        sep = None
-        engine = 'python'
-
-        if csv_delimiter == 'comma':
-            sep = ','
-            engine = 'c'
-        elif csv_delimiter == 'tab':
-            sep = '\t'
-            engine = 'c'
-        elif csv_delimiter == 'semicolon':
-            sep = ';'
-            engine = 'c'
-        elif csv_delimiter == 'pipe':
-            sep = '|'
-            engine = 'python'
-        elif csv_delimiter == 'space':
-            sep = r'\s+'
-            engine = 'python'
-
-        encodings = [csv_encoding] if csv_encoding and csv_encoding != 'auto' else ['utf-8', 'gbk', 'utf-8-sig', 'gb18030', 'latin1']
-        last_error = None
-
-        for enc in encodings:
-            try:
-                read_kwargs = {
-                    'sep': sep,
-                    'encoding': enc,
-                    'header': header_row,
-                    'engine': engine,
-                    'dtype': object,
-                    'keep_default_na': True,
-                    'skipinitialspace': True,
-                    'on_bad_lines': 'warn',
-                }
-                if engine == 'c':
-                    read_kwargs['low_memory'] = False
-                return pd.read_csv(file_path, **read_kwargs)
-            except Exception as e:
-                last_error = e
-                continue
-
-        raise ValueError(f"无法读取CSV文件: {last_error}")
-
-    engine = 'xlrd' if lower_path.endswith('.xls') else 'openpyxl'
-    return pd.read_excel(file_path, sheet_name=sheet_name, header=header_row, engine=engine, dtype=object)
 
 
 @register_node
@@ -291,10 +204,14 @@ class ReadExcelNode(BaseNode):
         sheet_name = self.get_param("sheet_name", "") or 0
         header_row = self.get_param("header_row", 0)
         
+        ext = str(file_path).lower()
+        engine = 'xlrd' if ext.endswith('.xls') else 'openpyxl'
+        
         df = pd.read_excel(
             file_path,
             sheet_name=sheet_name,
-            header=header_row
+            header=header_row,
+            engine=engine,
         )
         
         return {"data": df}

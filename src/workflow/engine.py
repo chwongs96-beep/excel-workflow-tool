@@ -185,13 +185,13 @@ class Workflow:
                 context.update(external_context)
             node.set_context(context)
             
-            # Inject progress callback
+            # Inject progress callback (bind loop vars via default args)
             if progress_callback:
-                def node_progress_wrapper(msg):
+                def node_progress_wrapper(msg, _i=i, _name=node.node_name, _nid=node_id):
                     try:
-                        progress_callback(i + 1, total_nodes, node.node_name, node_id, msg)
+                        progress_callback(_i + 1, total_nodes, _name, _nid, msg)
                     except TypeError:
-                        progress_callback(i + 1, total_nodes, f"{node.node_name} - {msg}", node_id)
+                        progress_callback(_i + 1, total_nodes, f"{_name} - {msg}", _nid)
                 node.set_progress_callback(node_progress_wrapper)
             
             # Validate node
@@ -254,13 +254,13 @@ class Workflow:
                 context.update(external_context)
             node.set_context(context)
             
-            # Inject progress callback
+            # Inject progress callback (bind loop vars via default args)
             if progress_callback:
-                def node_progress_wrapper(msg):
+                def node_progress_wrapper(msg, _i=i, _name=node.node_name, _nid=node_id):
                     try:
-                        progress_callback(i + 1, total_nodes, node.node_name, node_id, msg)
+                        progress_callback(_i + 1, total_nodes, _name, _nid, msg)
                     except TypeError:
-                        progress_callback(i + 1, total_nodes, f"{node.node_name} - {msg}", node_id)
+                        progress_callback(_i + 1, total_nodes, f"{_name} - {msg}", _nid)
                 node.set_progress_callback(node_progress_wrapper)
             
             # Validate node
@@ -321,19 +321,41 @@ class Workflow:
         with open(file_path, "r", encoding="utf-8") as f:
             data = json.load(f)
         
+        if not isinstance(data, dict):
+            raise ValueError("Invalid workflow file: root must be a JSON object")
+        
+        # Validate essential structure
+        nodes_data = data.get("nodes", {})
+        if not isinstance(nodes_data, dict):
+            raise ValueError("Invalid workflow file: 'nodes' must be a JSON object")
+        conns_data = data.get("connections", [])
+        if not isinstance(conns_data, list):
+            raise ValueError("Invalid workflow file: 'connections' must be a JSON array")
+        
         workflow = cls(data.get("name", "Untitled"))
         workflow._node_counter = data.get("node_counter", 0)
         workflow.global_params = data.get("global_params", {})
         
         # Recreate nodes
-        for node_id, node_data in data.get("nodes", {}).items():
+        for node_id, node_data in nodes_data.items():
+            if not isinstance(node_data, dict) or "node_type" not in node_data:
+                raise ValueError(f"Invalid node entry: {node_id}")
             node_type = node_data["node_type"]
-            node = NodeRegistry.create_node(node_type, node_id)
+            try:
+                node = NodeRegistry.create_node(node_type, node_id)
+            except ValueError:
+                print(f"Warning: Skipping unknown node type '{node_type}' ({node_id})")
+                continue
             node.from_dict(node_data)
             workflow.nodes[node_id] = node
         
         # Recreate connections
-        for conn_data in data.get("connections", []):
+        for conn_data in conns_data:
+            if not isinstance(conn_data, dict):
+                continue
+            required_keys = {"from_node", "from_port", "to_node", "to_port"}
+            if not required_keys.issubset(conn_data.keys()):
+                continue
             conn = Connection.from_dict(conn_data)
             workflow.connections.append(conn)
         
