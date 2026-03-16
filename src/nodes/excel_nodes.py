@@ -4,13 +4,240 @@ Excel-related nodes for reading, writing, and processing Excel files
 
 import pandas as pd
 import warnings
+import re
 from pathlib import Path
 from typing import Any, Dict, List
+import openpyxl
 from .base_node import BaseNode
 from .node_registry import register_node
 
 # Suppress openpyxl warnings
 warnings.filterwarnings('ignore', category=UserWarning, module='openpyxl')
+
+
+def normalize_excel_value(value: Any) -> Any:
+    """Normalize values before writing to Excel so numeric-looking text becomes numbers."""
+    if not isinstance(value, str):
+        return value
+
+    text = value.strip()
+    if text == "":
+        return ""
+
+    if text.startswith("="):
+        return text
+
+    # Keep likely identifiers with leading zeros as text.
+    if re.fullmatch(r"[+-]?0\d+", text):
+        return text
+
+    compact = text.replace(",", "")
+
+    if re.fullmatch(r"[+-]?\d+", compact):
+        try:
+            return int(compact)
+        except Exception:
+            return text
+
+    if re.fullmatch(r"[+-]?(\d+\.\d*|\d*\.\d+|\d+)([eE][+-]?\d+)?", compact):
+        try:
+            return float(compact)
+        except Exception:
+            return text
+
+    return text
+
+
+def normalize_dataframe_for_excel(df: pd.DataFrame) -> pd.DataFrame:
+    """Convert numeric-like text cells to numeric values before XLSX export."""
+    normalized = df.copy()
+    for col in normalized.columns:
+        normalized[col] = normalized[col].map(normalize_excel_value)
+    return normalized
+
+
+def read_tabular_file(file_path: str, sheet_name: Any = 0, header_row: int = 0, csv_encoding: str = "auto", csv_delimiter: str = "auto"):
+    """Read CSV/XLS/XLSX with the proper engine and options."""
+    lower_path = str(file_path).lower()
+
+    if lower_path.endswith('.csv'):
+        sep = None
+        engine = 'python'
+
+        if csv_delimiter == 'comma':
+            sep = ','
+            engine = 'c'
+        elif csv_delimiter == 'tab':
+            sep = '\t'
+            engine = 'c'
+        elif csv_delimiter == 'semicolon':
+            sep = ';'
+            engine = 'c'
+        elif csv_delimiter == 'pipe':
+            sep = '|'
+            engine = 'python'
+        elif csv_delimiter == 'space':
+            sep = r'\s+'
+            engine = 'python'
+
+        encodings = [csv_encoding] if csv_encoding and csv_encoding != 'auto' else ['utf-8', 'gbk', 'utf-8-sig', 'gb18030', 'latin1']
+        last_error = None
+
+        for enc in encodings:
+            try:
+                read_kwargs = {
+                    'sep': sep,
+                    'encoding': enc,
+                    'header': header_row,
+                    'engine': engine,
+                    'dtype': object,
+                    'keep_default_na': True,
+                    'skipinitialspace': True,
+                    'on_bad_lines': 'warn',
+                }
+                if engine == 'c':
+                    read_kwargs['low_memory'] = False
+                return pd.read_csv(file_path, **read_kwargs)
+            except Exception as e:
+                last_error = e
+                continue
+
+        raise ValueError(f"无法读取CSV文件: {last_error}")
+
+    engine = 'xlrd' if lower_path.endswith('.xls') else 'openpyxl'
+    return pd.read_excel(file_path, sheet_name=sheet_name, header=header_row, engine=engine, dtype=object)
+
+
+@register_node
+class ConvertToXlsxNode(BaseNode):
+    """Node to convert CSV/XLS/XLSX into a normalized XLSX file"""
+
+    node_type = "convert_to_xlsx"
+    node_name = "转换为XLSX"
+    node_category = "输入/输出"
+    node_description = "将CSV/XLS/XLSX转换为标准XLSX，并确保数字以数值格式写入"
+    node_color = "#14b8a6"  # Teal
+
+    def _setup_ports(self):
+        self.add_input("file_path", data_type="value")
+        self.add_output("file_path", data_type="value")
+
+    def get_config_ui_schema(self) -> List[Dict[str, Any]]:
+        return [
+            {
+                "key": "file_path",
+                "label": "来源文件",
+                "type": "file",
+                "file_filter": "表格文件 (*.xlsx *.xls *.csv);;所有文件 (*.*)",
+                "required": True
+            },
+            {
+                "key": "output_file",
+                "label": "输出XLSX路径",
+                "type": "file_save",
+                "file_filter": "Excel文件 (*.xlsx)",
+                "required": True
+            },
+            {
+                "key": "sheet_name",
+                "label": "工作表名称",
+                "type": "text",
+                "default": "Sheet1"
+            },
+            {
+                "key": "header_row",
+                "label": "标题行",
+                "type": "number",
+                "default": 0,
+                "min": 0
+            },
+            {
+                "key": "csv_delimiter",
+                "label": "CSV分隔符",
+                "type": "select",
+                "options": [
+                    {"value": "auto", "label": "自动检测"},
+                    {"value": "comma", "label": "逗号 (,)"},
+                    {"value": "tab", "label": "制表符 (Tab)"},
+                    {"value": "semicolon", "label": "分号 (;)"},
+                    {"value": "pipe", "label": "竖线 (|)"},
+                    {"value": "space", "label": "空格"}
+                ],
+                "default": "auto"
+            },
+            {
+                "key": "csv_encoding",
+                "label": "CSV编码",
+                "type": "select",
+                "options": [
+                    {"value": "auto", "label": "自动检测"},
+                    {"value": "utf-8", "label": "UTF-8"},
+                    {"value": "gbk", "label": "GBK/GB18030"},
+                    {"value": "utf-8-sig", "label": "UTF-8-SIG"}
+                ],
+                "default": "auto"
+            },
+            {
+                "key": "rebuild_xlsx",
+                "label": "即使输入是XLSX也重新标准化",
+                "type": "checkbox",
+                "default": False
+            }
+        ]
+
+    def validate(self) -> tuple[bool, str]:
+        file_path = self.get_param("file_path", "")
+        output_file = self.get_param("output_file", "")
+        if not file_path:
+            return False, "来源文件是必需的"
+        if not Path(file_path).exists():
+            return False, f"文件不存在: {file_path}"
+        if not output_file:
+            return False, "输出XLSX路径是必需的"
+        return True, ""
+
+    def execute(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
+        file_path = input_data.get("file_path") or self.get_param("file_path")
+        output_file = self.get_param("output_file")
+        sheet_name = self.get_param("sheet_name", "Sheet1")
+        header_row = self.get_param("header_row", 0)
+        csv_delimiter = self.get_param("csv_delimiter", "auto")
+        csv_encoding = self.get_param("csv_encoding", "auto")
+        rebuild_xlsx = self.get_param("rebuild_xlsx", False)
+
+        if not str(output_file).lower().endswith('.xlsx'):
+            output_file = str(output_file) + '.xlsx'
+
+        lower_path = str(file_path).lower()
+        if lower_path.endswith('.xlsx') and not rebuild_xlsx:
+            self.report_progress(f"输入已是XLSX，直接透传: {file_path}")
+            return {"file_path": str(file_path)}
+
+        self.report_progress(f"开始转换为XLSX: {Path(file_path).name}")
+
+        if lower_path.endswith('.csv'):
+            df = read_tabular_file(file_path, header_row=header_row, csv_encoding=csv_encoding, csv_delimiter=csv_delimiter)
+            df = normalize_dataframe_for_excel(df)
+            with pd.ExcelWriter(output_file, engine='openpyxl') as writer:
+                df.to_excel(writer, sheet_name=sheet_name, index=False)
+        else:
+            with pd.ExcelFile(file_path, engine='xlrd' if lower_path.endswith('.xls') else 'openpyxl') as excel_file:
+                workbook = openpyxl.Workbook()
+                default_sheet = workbook.active
+                workbook.remove(default_sheet)
+
+                for source_sheet in excel_file.sheet_names:
+                    df = read_tabular_file(file_path, sheet_name=source_sheet, header_row=header_row)
+                    df = normalize_dataframe_for_excel(df)
+                    ws = workbook.create_sheet(title=str(source_sheet)[:31] or "Sheet1")
+                    ws.append([str(col) for col in df.columns])
+                    for row in df.itertuples(index=False):
+                        ws.append([normalize_excel_value(val) for val in row])
+
+                workbook.save(output_file)
+
+        self.report_progress(f"转换完成: {output_file}")
+        return {"file_path": output_file}
 
 
 @register_node
