@@ -13,6 +13,7 @@ from .base_node import BaseNode
 from .node_registry import register_node
 from .utils import (
     convert_text_to_numeric,
+    detect_used_range,
     get_excel_file,
     make_unique_sheet_name,
     normalize_dataframe_for_excel,
@@ -30,12 +31,14 @@ warnings.filterwarnings('ignore', category=FutureWarning)
 
 class StyledSheet:
     """Wrapper to hold sheet info for style-preserved copying"""
-    def __init__(self, file_path, sheet_name, df_filtered=None, header_row=0, is_full_copy=False):
+    def __init__(self, file_path, sheet_name, df_filtered=None, header_row=0,
+                 is_full_copy=False, copy_mode="whole"):
         self.file_path = file_path
         self.sheet_name = sheet_name
         self.df_filtered = df_filtered
         self.header_row = header_row
         self.is_full_copy = is_full_copy
+        self.copy_mode = copy_mode
 
 
 # ============================================================================
@@ -577,6 +580,7 @@ class SheetCopyNode(BaseNode):
                 "type": "select",
                 "options": [
                     {"value": "whole", "label": "整页复制"},
+                    {"value": "used_range", "label": "自动检测有值区域"},
                     {"value": "columns", "label": "指定列到列"},
                     {"value": "no_blank", "label": "自动检查值(无空白)"}
                 ],
@@ -796,27 +800,33 @@ class SheetCopyNode(BaseNode):
                     self.report_progress(f"⚠️ .xls格式不支持样式保留: {Path(file_path).name}")
                 
                 # Check if this is a full copy (optimization)
+                # used_range is also a "full copy" in the sense that we bypass
+                # DataFrame iteration and copy directly via openpyxl, but with
+                # a trimmed boundary.
                 is_full_copy = (
-                    copy_mode == "whole" and 
+                    copy_mode in ("whole", "used_range") and
                     not filter_query and 
                     not remove_duplicates and 
                     not strip_whitespace
                 )
                 
+                def _make_styled(fp, sn, d, hr):
+                    return StyledSheet(fp, sn, d, hr,
+                                       is_full_copy=is_full_copy,
+                                       copy_mode=copy_mode)
+
                 # Use StyledSheet wrapper
                 if target_sheet in workbook:
                     existing = workbook[target_sheet]
                     if isinstance(existing, list):
-                        existing.append(StyledSheet(file_path, src_sheet_name, df, header_row, is_full_copy=is_full_copy))
+                        existing.append(_make_styled(file_path, src_sheet_name, df, header_row))
                     else:
-                        # Convert to list if appending
                         if write_mode == "append":
-                            workbook[target_sheet] = [existing, StyledSheet(file_path, src_sheet_name, df, header_row, is_full_copy=is_full_copy)]
+                            workbook[target_sheet] = [existing, _make_styled(file_path, src_sheet_name, df, header_row)]
                         else:
-                            # Overwrite
-                            workbook[target_sheet] = StyledSheet(file_path, src_sheet_name, df, header_row, is_full_copy=is_full_copy)
+                            workbook[target_sheet] = _make_styled(file_path, src_sheet_name, df, header_row)
                 else:
-                    workbook[target_sheet] = StyledSheet(file_path, src_sheet_name, df, header_row, is_full_copy=is_full_copy)
+                    workbook[target_sheet] = _make_styled(file_path, src_sheet_name, df, header_row)
                     
             else:
                 # Standard DataFrame mode
@@ -1155,12 +1165,14 @@ class WorkbookSaveNode(BaseNode):
             is_sequential = isinstance(df.index, pd.RangeIndex) and df.index.step == 1 and df.index.start == 0
             
             # Helper to copy a row from source to target
-            def copy_src_row(s_row, t_row):
+            def copy_src_row(s_row, t_row, min_col=1, max_col=None):
+                if max_col is None:
+                    max_col = src_ws.max_column
                 # Copy row dimensions
                 if s_row in src_ws.row_dimensions:
                     target_ws.row_dimensions[t_row] = copy_obj(src_ws.row_dimensions[s_row])
                     
-                for col in range(1, src_ws.max_column + 1):
+                for col in range(min_col, max_col + 1):
                     src_cell = src_ws.cell(row=s_row, column=col)
                     tgt_cell = target_ws.cell(row=t_row, column=col)
                     
@@ -1176,36 +1188,55 @@ class WorkbookSaveNode(BaseNode):
             # =================================================================
             # STRATEGY A: Full Copy (Direct OpenPyXL Copy)
             # =================================================================
-            # STRATEGY A: Full Copy (Direct OpenPyXL Copy) - OPTIMIZED
-            # =================================================================
-            # If this is a full copy of an Excel file, we should bypass DataFrame iteration
-            # to ensure we capture ALL rows (including blank ones) and ALL columns.
-            # This fixes issues where Pandas skips blank rows or fails to parse some columns.
             if styled.is_full_copy and not str(styled.file_path).lower().endswith('.csv'):
-                self.report_progress(f"⚡ 快速模式: 直接复制工作表 '{styled.sheet_name}'")
-                
-                # Calculate offset
-                # Source Row 1 -> Target Row start_row
-                offset = start_row - 1
-                
-                total_rows = src_ws.max_row
-                
-                # Performance optimization: Report progress less frequently for small files
+                use_detected_range = (styled.copy_mode == "used_range")
+
+                if use_detected_range:
+                    ur_min_row, ur_max_row, ur_min_col, ur_max_col = detect_used_range(src_ws)
+                    self.report_progress(
+                        f"🔍 自动检测有值区域: 行 {ur_min_row}-{ur_max_row}, "
+                        f"列 {ur_min_col}-{ur_max_col} "
+                        f"(原始范围: {src_ws.max_row} 行 x {src_ws.max_column} 列)"
+                    )
+                    row_start = ur_min_row
+                    row_end = ur_max_row
+                    col_start = ur_min_col
+                    col_end = ur_max_col
+                else:
+                    self.report_progress(f"⚡ 快速模式: 直接复制工作表 '{styled.sheet_name}'")
+                    row_start = 1
+                    row_end = src_ws.max_row
+                    col_start = 1
+                    col_end = src_ws.max_column
+
+                # Calculate offset: source row_start -> target start_row
+                offset = start_row - row_start
+                total_rows = row_end - row_start + 1
+
                 progress_interval = 1000 if total_rows > 5000 else 5000
                 
-                for r in range(1, total_rows + 1):
-                    if r % progress_interval == 0:
-                        self.report_progress(f"复制行 {r}/{total_rows} ({int(r/total_rows*100)}%)")
+                for r in range(row_start, row_end + 1):
+                    copied = r - row_start + 1
+                    if copied % progress_interval == 0:
+                        self.report_progress(f"复制行 {copied}/{total_rows} ({int(copied/total_rows*100)}%)")
                     
-                    copy_src_row(r, start_row)
+                    copy_src_row(r, start_row, col_start, col_end)
                     start_row += 1
                 
-                # Copy column dimensions
-                for col_letter, dim in src_ws.column_dimensions.items():
-                    target_ws.column_dimensions[col_letter] = copy_obj(dim)
+                # Copy column dimensions (only within range)
+                for col_idx in range(col_start, col_end + 1):
+                    col_letter = get_column_letter(col_idx)
+                    if col_letter in src_ws.column_dimensions:
+                        target_ws.column_dimensions[col_letter] = copy_obj(
+                            src_ws.column_dimensions[col_letter]
+                        )
                 
-                # Copy merged cells
+                # Copy merged cells (only those within the copied range)
                 for range_ in src_ws.merged_cells.ranges:
+                    if use_detected_range:
+                        if (range_.min_row < row_start or range_.max_row > row_end or
+                                range_.min_col < col_start or range_.max_col > col_end):
+                            continue
                     min_row = range_.min_row + offset
                     max_row = range_.max_row + offset
                     try:

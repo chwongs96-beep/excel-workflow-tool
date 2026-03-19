@@ -299,3 +299,59 @@ def read_tabular_file(
         file_path, sheet_name=sheet_name, header=header_row,
         engine=engine, dtype=object,
     )
+
+
+# ---------------------------------------------------------------------------
+# Used-range detection
+# ---------------------------------------------------------------------------
+
+def detect_used_range(ws) -> Tuple[int, int, int, int]:
+    """Detect the actual used range of an openpyxl worksheet.
+
+    Scans cell values **and** merged-cell ranges to determine the tightest
+    bounding rectangle that contains all non-empty content.
+
+    Returns ``(min_row, max_row, min_col, max_col)`` using 1-based indexing
+    (same convention as openpyxl).  For a completely empty sheet the return
+    value is ``(1, 1, 1, 1)``.
+    """
+    real_max_row = 0
+    real_max_col = 0
+    real_min_row = ws.max_row or 1
+    real_min_col = ws.max_column or 1
+
+    # Scan from the reported max_row downward to find the true last row with
+    # a value, and similarly for columns.  We iterate all cells that openpyxl
+    # knows about rather than probing row-by-row from the end, because
+    # ws.iter_rows is efficient and handles sparse sheets well.
+    for row in ws.iter_rows(min_row=1, max_row=ws.max_row,
+                            min_col=1, max_col=ws.max_column):
+        for cell in row:
+            if cell.value is not None:
+                r, c = cell.row, cell.column
+                if r < real_min_row:
+                    real_min_row = r
+                if r > real_max_row:
+                    real_max_row = r
+                if c < real_min_col:
+                    real_min_col = c
+                if c > real_max_col:
+                    real_max_col = c
+
+    # Expand boundaries to include merged-cell ranges (a merged region may
+    # extend beyond the last valued cell).
+    for rng in ws.merged_cells.ranges:
+        if rng.min_row < real_min_row:
+            real_min_row = rng.min_row
+        if rng.max_row > real_max_row:
+            real_max_row = rng.max_row
+        if rng.min_col < real_min_col:
+            real_min_col = rng.min_col
+        if rng.max_col > real_max_col:
+            real_max_col = rng.max_col
+
+    # Fallback for completely empty sheets
+    if real_max_row == 0:
+        return (1, 1, 1, 1)
+
+    return (real_min_row, real_max_row, real_min_col, real_max_col)
