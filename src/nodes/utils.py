@@ -70,10 +70,15 @@ def normalize_excel_value(value: Any) -> Any:
 
 
 def clean_unnamed_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """Replace pandas auto-generated ``Unnamed: N`` column names with empty strings."""
+    """Replace auto-generated placeholder column names with empty strings.
+
+    Handles both pandas ``Unnamed: N`` and our own ``_col_N`` placeholders.
+    """
     df = df.copy()
     df.columns = [
-        "" if isinstance(c, str) and re.match(r"^Unnamed:\s*\d+", c) else c
+        "" if isinstance(c, str) and (
+            re.match(r"^Unnamed:\s*\d+", c) or re.match(r"^_col_\d+$", c)
+        ) else c
         for c in df.columns
     ]
     return df
@@ -240,30 +245,55 @@ def read_csv_with_options(
     last_error: Exception | None = None
     for enc in encodings:
         try:
-            # First pass: count total lines so we can detect dropped rows
-            bad_line_count = 0
+            # --- Phase 1: determine max field count across all rows ----------
+            # Without this, pandas uses the first row's field count and drops
+            # any row that has more fields (treating it as a "bad line").
+            actual_sep = sep
+            try:
+                with open(file_path, encoding=enc) as fh:
+                    if actual_sep is None:
+                        import csv as _csv
+                        sample = fh.read(8192)
+                        dialect = _csv.Sniffer().sniff(sample)
+                        actual_sep = dialect.delimiter
+                        fh.seek(0)
+                    max_fields = 0
+                    for line in fh:
+                        if line.strip():
+                            n = line.count(actual_sep) + 1
+                            if n > max_fields:
+                                max_fields = n
+            except Exception:
+                max_fields = 0
 
-            def _on_bad_line(bad_line):
-                nonlocal bad_line_count
-                bad_line_count += 1
-                return None
-
+            # --- Phase 2: read CSV with explicit column count ----------------
             read_kwargs: dict[str, Any] = {
                 'sep': sep,
                 'encoding': enc,
-                'header': header_row,
-                'engine': 'python',  # callable on_bad_lines requires python engine
+                'header': None,
+                'engine': 'python',
                 'keep_default_na': True,
                 'skipinitialspace': True,
-                'on_bad_lines': _on_bad_line,
+                'on_bad_lines': 'warn',
             }
             if dtype is not None:
                 read_kwargs['dtype'] = dtype
+            if max_fields > 0:
+                read_kwargs['names'] = list(range(max_fields))
 
             df = pd.read_csv(file_path, **read_kwargs)
 
-            if bad_line_count > 0:
-                print(f"⚠️ CSV读取: 跳过了 {bad_line_count} 行格式异常的数据 ({Path(file_path).name})")
+            # Promote the designated header row to column names
+            hdr_idx = header_row if header_row is not None else 0
+            if hdr_idx < len(df):
+                new_cols = []
+                for i, val in enumerate(df.iloc[hdr_idx]):
+                    if pd.notna(val) and str(val).strip():
+                        new_cols.append(str(val).strip())
+                    else:
+                        new_cols.append(f"_col_{i}")
+                df.columns = new_cols
+                df = df.iloc[hdr_idx + 1:].reset_index(drop=True)
 
             if auto_convert_numeric and dtype is None:
                 df, converted_cols = convert_text_to_numeric(df)

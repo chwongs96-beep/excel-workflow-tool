@@ -423,6 +423,7 @@ class WorkbookAppendNode(BaseNode):
                     file_path, csv_encoding, csv_delimiter, header_row,
                     dtype=object, auto_convert_numeric=False,
                 )
+                df = clean_unnamed_columns(df)
                 default_name = Path(file_path).stem
                 
                 # Determine target name
@@ -695,6 +696,7 @@ class SheetCopyNode(BaseNode):
                     file_path, csv_encoding, csv_delimiter, header_row,
                     dtype=object, auto_convert_numeric=False,
                 )
+                df = clean_unnamed_columns(df)
                 self.report_progress(f"CSV读取成功: {len(df)}行 x {len(df.columns)}列")
             else:
                 if not src_sheet_name:
