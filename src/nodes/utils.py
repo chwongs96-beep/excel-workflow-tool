@@ -108,11 +108,53 @@ def make_unique_sheet_name(name: str, used_names=None) -> str:
 # File reading helpers
 # ---------------------------------------------------------------------------
 
-def read_excel_with_engine(file_path, sheet_name: Any = 0, header: int = 0):
-    """Read an Excel file using the correct engine based on extension."""
+def read_excel_with_engine(file_path, sheet_name: Any = 0, header: int = 0, dtype=None):
+    """Read an Excel file using the correct engine based on extension.
+
+    Parameters
+    ----------
+    dtype : optional
+        Passed to :func:`pd.read_excel`.  Use ``object`` to preserve all
+        values as strings (prevents leading-zero loss, etc.).
+    """
     ext = str(file_path).lower()
     engine = 'xlrd' if ext.endswith('.xls') else 'openpyxl'
-    return pd.read_excel(file_path, sheet_name=sheet_name, header=header, engine=engine)
+    kwargs: dict[str, Any] = dict(
+        sheet_name=sheet_name, header=header, engine=engine,
+    )
+    if dtype is not None:
+        kwargs['dtype'] = dtype
+    return pd.read_excel(file_path, **kwargs)
+
+
+def get_xls_merged_cells(file_path, sheet_name=None) -> List[Tuple[int, int, int, int]]:
+    """Return merged-cell ranges from an ``.xls`` file via *xlrd*.
+
+    Each range is ``(row_start, row_end, col_start, col_end)`` using
+    **0-indexed, exclusive-end** convention (same as xlrd).
+
+    Returns an empty list when merged-cell info cannot be read.
+    """
+    try:
+        import xlrd
+    except ImportError:
+        return []
+    try:
+        wb = xlrd.open_workbook(str(file_path), formatting_info=True)
+    except Exception:
+        try:
+            wb = xlrd.open_workbook(str(file_path))
+        except Exception:
+            return []
+
+    try:
+        if sheet_name:
+            ws = wb.sheet_by_name(sheet_name)
+        else:
+            ws = wb.sheet_by_index(0)
+        return list(ws.merged_cells)
+    except Exception:
+        return []
 
 
 def get_excel_file(file_path) -> pd.ExcelFile:
@@ -188,22 +230,30 @@ def read_csv_with_options(
     last_error: Exception | None = None
     for enc in encodings:
         try:
+            # First pass: count total lines so we can detect dropped rows
+            bad_line_count = 0
+
+            def _on_bad_line(bad_line):
+                nonlocal bad_line_count
+                bad_line_count += 1
+                return None
+
             read_kwargs: dict[str, Any] = {
                 'sep': sep,
                 'encoding': enc,
                 'header': header_row,
-                'engine': engine,
+                'engine': 'python',  # callable on_bad_lines requires python engine
                 'keep_default_na': True,
                 'skipinitialspace': True,
-                'on_bad_lines': 'warn',
+                'on_bad_lines': _on_bad_line,
             }
             if dtype is not None:
                 read_kwargs['dtype'] = dtype
-            # low_memory is only supported by the C engine
-            if engine == 'c':
-                read_kwargs['low_memory'] = False
 
             df = pd.read_csv(file_path, **read_kwargs)
+
+            if bad_line_count > 0:
+                print(f"⚠️ CSV读取: 跳过了 {bad_line_count} 行格式异常的数据 ({Path(file_path).name})")
 
             if auto_convert_numeric and dtype is None:
                 df, converted_cols = convert_text_to_numeric(df)

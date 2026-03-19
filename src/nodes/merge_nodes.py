@@ -15,6 +15,7 @@ from .utils import (
     convert_text_to_numeric,
     get_excel_file,
     make_unique_sheet_name,
+    normalize_dataframe_for_excel,
     normalize_excel_value,
     read_csv_with_options,
     read_excel_with_engine,
@@ -124,16 +125,15 @@ class MergeExcelFilesNode(BaseNode):
         # Helper to read sheets based on mode
         def read_sheets(file_path):
             if sheet_mode == "all":
-                return read_excel_with_engine(file_path, sheet_name=None, header=0)
+                return read_excel_with_engine(file_path, sheet_name=None, header=0, dtype=object)
             elif sheet_mode == "first":
-                df = read_excel_with_engine(file_path, sheet_name=0, header=0)
-                return {"Sheet1": df} # Use generic name, will be renamed
+                df = read_excel_with_engine(file_path, sheet_name=0, header=0, dtype=object)
+                return {"Sheet1": df}
             elif sheet_mode == "name":
                 if not target_sheet_name:
-                    # Fallback to all if name not specified
-                    return read_excel_with_engine(file_path, sheet_name=None, header=0)
+                    return read_excel_with_engine(file_path, sheet_name=None, header=0, dtype=object)
                 try:
-                    df = read_excel_with_engine(file_path, sheet_name=target_sheet_name, header=0)
+                    df = read_excel_with_engine(file_path, sheet_name=target_sheet_name, header=0, dtype=object)
                     return {target_sheet_name: df}
                 except Exception:
                     print(f"Warning: Sheet '{target_sheet_name}' not found in {file_path}")
@@ -142,11 +142,7 @@ class MergeExcelFilesNode(BaseNode):
 
         # Read base file sheets
         try:
-            # Base file always reads all sheets usually, or should it follow the rule?
-            # Let's assume base file is the "template" so we keep all its sheets usually.
-            # But if user wants to merge specific sheets from ALL files including base...
-            # Let's keep base file intact (all sheets) as it is the "Base".
-            base_dfs = read_excel_with_engine(base_file, sheet_name=None, header=0)
+            base_dfs = read_excel_with_engine(base_file, sheet_name=None, header=0, dtype=object)
         except Exception as e:
             raise ValueError(f"读取基础文件失败: {e}")
             
@@ -186,11 +182,11 @@ class MergeExcelFilesNode(BaseNode):
             except Exception as e:
                 print(f"Warning: Failed to read {file_path}: {e}")
         
-        # Write to output file
+        # Write to output file (normalize so numeric-looking strings become real numbers)
         with pd.ExcelWriter(output_file, engine='openpyxl') as writer:
             for sheet_name, df in merged_sheets.items():
-                # Excel sheet name limit is 31 chars
                 safe_name = sheet_name[:31]
+                df = normalize_dataframe_for_excel(df)
                 df.to_excel(writer, sheet_name=safe_name, index=False)
                 
         return {"file_path": output_file}
@@ -234,8 +230,7 @@ class WorkbookCreateNode(BaseNode):
                 if str(base_file).lower().endswith('.xls'):
                     self.report_progress(f"⚠️ .xls格式不支持样式保留: {Path(base_file).name}")
                 
-                # Read all sheets as DataFrames
-                dfs = read_excel_with_engine(base_file, sheet_name=None, header=0)
+                dfs = read_excel_with_engine(base_file, sheet_name=None, header=0, dtype=object)
                 
                 # Wrap them in StyledSheet to preserve original styles
                 for sheet_name, df in dfs.items():
@@ -417,9 +412,10 @@ class WorkbookAppendNode(BaseNode):
                 self.report_progress(f"⚠️ .xls格式不支持样式保留: {Path(file_path).name}")
             
             if is_csv:
-                # CSV handling
-                df = read_csv_with_options(file_path, csv_encoding, csv_delimiter, header_row)
-                
+                df = read_csv_with_options(
+                    file_path, csv_encoding, csv_delimiter, header_row,
+                    dtype=object, auto_convert_numeric=False,
+                )
                 default_name = Path(file_path).stem
                 
                 # Determine target name
@@ -438,7 +434,7 @@ class WorkbookAppendNode(BaseNode):
                 workbook[t_name] = df
                 
             elif sheet_mode == "all":
-                dfs = read_excel_with_engine(file_path, sheet_name=None, header=0)
+                dfs = read_excel_with_engine(file_path, sheet_name=None, header=0, dtype=object)
                 for name, df in dfs.items():
                     # Determine target name
                     if target_name:
@@ -468,15 +464,14 @@ class WorkbookAppendNode(BaseNode):
                 # Single sheet
                 actual_sheet_name = src_sheet_name
                 if sheet_mode == "first":
-                    # We need to find the name of the first sheet for StyledSheet
                     xl = get_excel_file(file_path)
                     actual_sheet_name = xl.sheet_names[0]
-                    df = read_excel_with_engine(file_path, sheet_name=0, header=0)
-                    default_name = Path(file_path).stem # Use filename as default sheet name
+                    df = read_excel_with_engine(file_path, sheet_name=0, header=0, dtype=object)
+                    default_name = Path(file_path).stem
                 else: # name
                     if not src_sheet_name:
                         raise ValueError("未指定源工作表名称")
-                    df = read_excel_with_engine(file_path, sheet_name=src_sheet_name, header=0)
+                    df = read_excel_with_engine(file_path, sheet_name=src_sheet_name, header=0, dtype=object)
                     default_name = src_sheet_name
                     actual_sheet_name = src_sheet_name
                 
@@ -692,15 +687,16 @@ class SheetCopyNode(BaseNode):
         try:
             is_csv = str(file_path).lower().endswith('.csv')
             if is_csv:
-                df = read_csv_with_options(file_path, csv_encoding, csv_delimiter, header_row)
+                df = read_csv_with_options(
+                    file_path, csv_encoding, csv_delimiter, header_row,
+                    dtype=object, auto_convert_numeric=False,
+                )
                 self.report_progress(f"CSV读取成功: {len(df)}行 x {len(df.columns)}列")
             else:
-                # Excel
                 if not src_sheet_name:
-                    # Default to first sheet if not specified
-                    df = read_excel_with_engine(file_path, sheet_name=0, header=header_row)
+                    df = read_excel_with_engine(file_path, sheet_name=0, header=header_row, dtype=object)
                 else:
-                    df = read_excel_with_engine(file_path, sheet_name=src_sheet_name, header=header_row)
+                    df = read_excel_with_engine(file_path, sheet_name=src_sheet_name, header=header_row, dtype=object)
                 self.report_progress(f"Excel读取成功: {len(df)}行 x {len(df.columns)}列")
         except Exception as e:
             raise ValueError(f"读取来源文件失败: {e}")
@@ -926,8 +922,7 @@ class WorkbookSaveNode(BaseNode):
                 if isinstance(df, pd.DataFrame):
                     safe_name = make_unique_sheet_name(sheet_name, used_names)
                     used_names.add(safe_name)
-                    # Optional: Sanitize dataframe content if needed, but might be slow
-                    # df = df.applymap(sanitize_value) 
+                    df = normalize_dataframe_for_excel(df)
                     df.to_excel(writer, sheet_name=safe_name, index=False)
 
     def _save_with_styles(self, output_file, workbook):

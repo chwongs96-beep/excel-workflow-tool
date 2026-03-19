@@ -12,6 +12,7 @@ import pandas as pd
 from .base_node import BaseNode
 from .node_registry import register_node
 from .utils import (
+    get_xls_merged_cells,
     normalize_excel_value,
     normalize_dataframe_for_excel,
     read_tabular_file,
@@ -146,8 +147,9 @@ class ConvertToXlsxNode(BaseNode):
                 df.to_excel(writer, sheet_name=sheet_name, index=False)
             self._verify_conversion(output_file, sheet_name, df)
         else:
+            is_xls = lower_path.endswith('.xls')
             source_dfs = {}
-            with pd.ExcelFile(file_path, engine='xlrd' if lower_path.endswith('.xls') else 'openpyxl') as excel_file:
+            with pd.ExcelFile(file_path, engine='xlrd' if is_xls else 'openpyxl') as excel_file:
                 workbook = openpyxl.Workbook()
                 default_sheet = workbook.active
                 workbook.remove(default_sheet)
@@ -161,6 +163,33 @@ class ConvertToXlsxNode(BaseNode):
                     for row in df.itertuples(index=False):
                         ws.append([normalize_excel_value(val) for val in row])
                     source_dfs[safe_title] = df
+
+                    # Preserve merged cells from XLS via xlrd
+                    if is_xls:
+                        merged = get_xls_merged_cells(file_path, source_sheet)
+                        applied = 0
+                        for rlo, rhi, clo, chi in merged:
+                            # xlrd: 0-indexed, exclusive end
+                            # openpyxl: 1-indexed, inclusive end
+                            # header_row rows are consumed as DataFrame header,
+                            # so output row 1 = source header_row, row 2 = header_row+1 ...
+                            out_start_row = rlo - header_row + 1
+                            out_end_row = rhi - header_row  # rhi exclusive → inclusive
+                            out_start_col = clo + 1
+                            out_end_col = chi  # chi exclusive → inclusive
+
+                            if out_start_row < 1 or out_end_row < 1:
+                                continue
+                            try:
+                                ws.merge_cells(
+                                    start_row=out_start_row, start_column=out_start_col,
+                                    end_row=out_end_row, end_column=out_end_col,
+                                )
+                                applied += 1
+                            except Exception:
+                                pass
+                        if applied:
+                            self.report_progress(f"  [{safe_title}] 已保留 {applied} 个合并单元格")
 
                 workbook.save(output_file)
 
