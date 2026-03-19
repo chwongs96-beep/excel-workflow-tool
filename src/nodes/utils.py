@@ -69,6 +69,16 @@ def normalize_excel_value(value: Any) -> Any:
     return text
 
 
+def clean_unnamed_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Replace pandas auto-generated ``Unnamed: N`` column names with empty strings."""
+    df = df.copy()
+    df.columns = [
+        "" if isinstance(c, str) and re.match(r"^Unnamed:\s*\d+", c) else c
+        for c in df.columns
+    ]
+    return df
+
+
 def normalize_dataframe_for_excel(df: pd.DataFrame) -> pd.DataFrame:
     """Apply :func:`normalize_excel_value` to every cell in *df*."""
     normalized = df.copy()

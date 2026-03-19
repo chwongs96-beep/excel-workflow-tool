@@ -12,6 +12,7 @@ from openpyxl.utils import get_column_letter
 from .base_node import BaseNode
 from .node_registry import register_node
 from .utils import (
+    clean_unnamed_columns,
     convert_text_to_numeric,
     detect_used_range,
     get_excel_file,
@@ -125,18 +126,21 @@ class MergeExcelFilesNode(BaseNode):
         sheet_mode = self.get_param("sheet_mode", "all")
         target_sheet_name = self.get_param("sheet_name", "")
         
+        def _clean_dict(dfs):
+            return {k: clean_unnamed_columns(v) for k, v in dfs.items()}
+
         # Helper to read sheets based on mode
         def read_sheets(file_path):
             if sheet_mode == "all":
-                return read_excel_with_engine(file_path, sheet_name=None, header=0, dtype=object)
+                return _clean_dict(read_excel_with_engine(file_path, sheet_name=None, header=0, dtype=object))
             elif sheet_mode == "first":
-                df = read_excel_with_engine(file_path, sheet_name=0, header=0, dtype=object)
+                df = clean_unnamed_columns(read_excel_with_engine(file_path, sheet_name=0, header=0, dtype=object))
                 return {"Sheet1": df}
             elif sheet_mode == "name":
                 if not target_sheet_name:
-                    return read_excel_with_engine(file_path, sheet_name=None, header=0, dtype=object)
+                    return _clean_dict(read_excel_with_engine(file_path, sheet_name=None, header=0, dtype=object))
                 try:
-                    df = read_excel_with_engine(file_path, sheet_name=target_sheet_name, header=0, dtype=object)
+                    df = clean_unnamed_columns(read_excel_with_engine(file_path, sheet_name=target_sheet_name, header=0, dtype=object))
                     return {target_sheet_name: df}
                 except Exception:
                     print(f"Warning: Sheet '{target_sheet_name}' not found in {file_path}")
@@ -145,7 +149,7 @@ class MergeExcelFilesNode(BaseNode):
 
         # Read base file sheets
         try:
-            base_dfs = read_excel_with_engine(base_file, sheet_name=None, header=0, dtype=object)
+            base_dfs = _clean_dict(read_excel_with_engine(base_file, sheet_name=None, header=0, dtype=object))
         except Exception as e:
             raise ValueError(f"读取基础文件失败: {e}")
             
@@ -235,8 +239,8 @@ class WorkbookCreateNode(BaseNode):
                 
                 dfs = read_excel_with_engine(base_file, sheet_name=None, header=0, dtype=object)
                 
-                # Wrap them in StyledSheet to preserve original styles
                 for sheet_name, df in dfs.items():
+                    df = clean_unnamed_columns(df)
                     workbook[sheet_name] = StyledSheet(base_file, sheet_name, df, is_full_copy=True)
                     
             except Exception as e:
@@ -439,11 +443,8 @@ class WorkbookAppendNode(BaseNode):
             elif sheet_mode == "all":
                 dfs = read_excel_with_engine(file_path, sheet_name=None, header=0, dtype=object)
                 for name, df in dfs.items():
-                    # Determine target name
+                    df = clean_unnamed_columns(df)
                     if target_name:
-                        # If target name provided for ALL sheets, we must append index or something
-                        # But usually target_name is for single sheet.
-                        # Let's just use original name + conflict resolution
                         t_name = name
                     else:
                         t_name = name
@@ -460,7 +461,6 @@ class WorkbookAppendNode(BaseNode):
                         t_name = f"{base_t_name}_{counter}"
                         counter += 1
                         
-                    # Wrap in StyledSheet for style preservation
                     workbook[t_name] = StyledSheet(file_path, name, df, is_full_copy=True)
                     
             else:
@@ -469,12 +469,12 @@ class WorkbookAppendNode(BaseNode):
                 if sheet_mode == "first":
                     xl = get_excel_file(file_path)
                     actual_sheet_name = xl.sheet_names[0]
-                    df = read_excel_with_engine(file_path, sheet_name=0, header=0, dtype=object)
+                    df = clean_unnamed_columns(read_excel_with_engine(file_path, sheet_name=0, header=0, dtype=object))
                     default_name = Path(file_path).stem
                 else: # name
                     if not src_sheet_name:
                         raise ValueError("未指定源工作表名称")
-                    df = read_excel_with_engine(file_path, sheet_name=src_sheet_name, header=0, dtype=object)
+                    df = clean_unnamed_columns(read_excel_with_engine(file_path, sheet_name=src_sheet_name, header=0, dtype=object))
                     default_name = src_sheet_name
                     actual_sheet_name = src_sheet_name
                 
@@ -701,6 +701,7 @@ class SheetCopyNode(BaseNode):
                     df = read_excel_with_engine(file_path, sheet_name=0, header=header_row, dtype=object)
                 else:
                     df = read_excel_with_engine(file_path, sheet_name=src_sheet_name, header=header_row, dtype=object)
+                df = clean_unnamed_columns(df)
                 self.report_progress(f"Excel读取成功: {len(df)}行 x {len(df.columns)}列")
         except Exception as e:
             raise ValueError(f"读取来源文件失败: {e}")
@@ -932,6 +933,7 @@ class WorkbookSaveNode(BaseNode):
                 if isinstance(df, pd.DataFrame):
                     safe_name = make_unique_sheet_name(sheet_name, used_names)
                     used_names.add(safe_name)
+                    df = clean_unnamed_columns(df)
                     df = normalize_dataframe_for_excel(df)
                     df.to_excel(writer, sheet_name=safe_name, index=False)
 
@@ -1041,8 +1043,10 @@ class WorkbookSaveNode(BaseNode):
                 
                 # Write header if it's the first item
                 if current_row == 1:
-                    # Sanitize header columns
-                    headers = [sanitize_value(str(col)) for col in item.columns]
+                    headers = [
+                        sanitize_value(str(col)) if col != "" else None
+                        for col in item.columns
+                    ]
                     target_ws.append(headers)
                     current_row += 1
                 
