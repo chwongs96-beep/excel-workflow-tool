@@ -958,32 +958,36 @@ class WorkbookSaveNode(BaseNode):
                 
                 # Update/Add sheets
                 for sheet_name, data in workbook.items():
-                    safe_name = make_unique_sheet_name(sheet_name, used_names)
-                    used_names.add(safe_name)
-                    handled_sheets.add(safe_name)
-                    
+                    sanitized = sanitize_sheet_name(sheet_name)
+
                     # Check if this is the original sheet from template (unmodified)
                     is_original = False
                     if isinstance(data, StyledSheet):
-                        if (data.file_path == template_file and 
-                            sanitize_sheet_name(data.sheet_name) == safe_name and
+                        if (data.file_path == template_file and
+                            sanitized == sanitize_sheet_name(data.sheet_name) and
                             data.is_full_copy and
-                            safe_name in wb.sheetnames):
+                            sanitized in wb.sheetnames):
                             is_original = True
-                    
+
                     if is_original:
-                        # It's already in the file, skip writing
+                        # Already in the template file — keep as-is
+                        used_names.add(sanitized)
+                        handled_sheets.add(sanitized)
                         continue
-                    
-                    # If we are here, we need to write this sheet.
+
+                    # Not original — generate a unique name that avoids
+                    # collisions with both template sheets and earlier entries.
+                    safe_name = make_unique_sheet_name(sheet_name, used_names)
+                    used_names.add(safe_name)
+                    handled_sheets.add(safe_name)
+
                     # If it exists in template (but we are overwriting it), remove it first.
                     if safe_name in wb.sheetnames:
-                        # Remove existing sheet to overwrite
                         wb.remove(wb[safe_name])
-                    
+
                     # Create new sheet
                     target_ws = wb.create_sheet(title=safe_name)
-                    
+
                     # Write data
                     self._write_items_to_sheet(data, target_ws)
                 
