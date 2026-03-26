@@ -8,7 +8,7 @@ excel_nodes.py and merge_nodes.py.
 import re
 import pandas as pd
 from pathlib import Path
-from typing import Any, List, Tuple
+from typing import Any, List, Optional, Tuple
 
 from openpyxl.cell.cell import ILLEGAL_CHARACTERS_RE
 
@@ -395,3 +395,119 @@ def detect_used_range(ws) -> Tuple[int, int, int, int]:
         return (1, 1, 1, 1)
 
     return (real_min_row, real_max_row, real_min_col, real_max_col)
+
+
+# ---------------------------------------------------------------------------
+# DataFrame grid ↔ Excel coordinates (row 1 = column headers)
+# ---------------------------------------------------------------------------
+
+
+def _df_cell_has_content(value: Any) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, float) and pd.isna(value):
+        return False
+    if isinstance(value, str) and value.strip() == "":
+        return False
+    return True
+
+
+def parse_a1_range(range_str: str) -> Tuple[int, int, int, int]:
+    """Parse an Excel A1 range into *(min_row, max_row, min_col, max_col)* (1-based inclusive).
+
+    Examples: ``"B2:D10"``, ``"A1"`` (single cell).  Compatible with openpyxl.
+    """
+    from openpyxl.utils.cell import range_boundaries
+
+    s = (range_str or "").strip()
+    if not s:
+        raise ValueError("请填写 Excel 区域，例如 A2:Z100")
+    if ":" not in s:
+        s = f"{s}:{s}"
+    min_col, min_row, max_col, max_row = range_boundaries(s)
+    return (min_row, max_row, min_col, max_col)
+
+
+def detect_used_range_from_dataframe(df: pd.DataFrame) -> Tuple[int, int, int, int]:
+    """Tight bounding box of non-empty cells if *df* were saved with row 1 as headers.
+
+    Returns ``(min_row, max_row, min_col, max_col)`` in Excel 1-based coordinates.
+    Row **1** is the header row (``df.columns``); row **2+** are data rows.
+    """
+    nrows = len(df)
+    ncols = len(df.columns)
+    if ncols == 0:
+        return (1, 1, 1, 1)
+
+    min_r: Optional[int] = None
+    max_r: Optional[int] = None
+    min_c: Optional[int] = None
+    max_c: Optional[int] = None
+
+    def touch(ex_row: int, ex_col: int) -> None:
+        nonlocal min_r, max_r, min_c, max_c
+        if min_r is None:
+            min_r = max_r = ex_row
+            min_c = max_c = ex_col
+            return
+        min_r = min(min_r, ex_row)
+        max_r = max(max_r, ex_row)
+        min_c = min(min_c, ex_col)
+        max_c = max(max_c, ex_col)
+
+    for j, col in enumerate(df.columns):
+        if _df_cell_has_content(col):
+            touch(1, j + 1)
+
+    for i in range(nrows):
+        for j in range(ncols):
+            if _df_cell_has_content(df.iat[i, j]):
+                touch(i + 2, j + 1)
+
+    if min_r is None:
+        return (1, 1, 1, 1)
+
+    return (min_r, max_r, min_c, max_c)
+
+
+def clear_dataframe_excel_range(
+    df: pd.DataFrame,
+    min_row: int,
+    max_row: int,
+    min_col: int,
+    max_col: int,
+    *,
+    clear_header_cells: bool = True,
+) -> pd.DataFrame:
+    """Clear cell *values* inside an Excel-style rectangle (1-based inclusive).
+
+    Row **1** is treated as column headers: when *clear_header_cells* is true,
+    affected header positions are set to empty strings.  Data rows start at **2**.
+    """
+    out = df.copy()
+    nrows = len(out)
+    ncols = len(out.columns)
+    if ncols == 0:
+        return out
+
+    min_row = max(1, int(min_row))
+    min_col = max(1, int(min_col))
+    max_col = min(int(max_col), ncols)
+    last_data_excel_row = 1 + nrows
+    max_row = min(int(max_row), last_data_excel_row)
+
+    if max_row < min_row or max_col < min_col:
+        return out
+
+    new_cols = list(out.columns)
+    for r_ex in range(min_row, max_row + 1):
+        for c_ex in range(min_col, max_col + 1):
+            if r_ex == 1:
+                if clear_header_cells:
+                    new_cols[c_ex - 1] = ""
+            else:
+                ri = r_ex - 2
+                if 0 <= ri < nrows:
+                    out.iat[ri, c_ex - 1] = pd.NA
+    out.columns = pd.Index(new_cols)
+    return out

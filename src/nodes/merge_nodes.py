@@ -13,12 +13,15 @@ from .base_node import BaseNode
 from .node_registry import register_node
 from .utils import (
     clean_unnamed_columns,
+    clear_dataframe_excel_range,
     convert_text_to_numeric,
     detect_used_range,
+    detect_used_range_from_dataframe,
     get_excel_file,
     make_unique_sheet_name,
     normalize_dataframe_for_excel,
     normalize_excel_value,
+    parse_a1_range,
     read_csv_with_options,
     read_excel_with_engine,
     sanitize_sheet_name,
@@ -856,6 +859,171 @@ class SheetCopyNode(BaseNode):
         except Exception as e:
             raise ValueError(f"处理文件失败 [{file_path}]: {e}")
             
+        return {"workbook": workbook}
+
+
+@register_node
+class SheetClearRangeNode(BaseNode):
+    """Clear cell contents in workbook sheets (DataFrame grid: row 1 = headers)."""
+
+    node_type = "sheet_clear_range"
+    node_name = "清理工作表内容"
+    node_category = "灵活合并"
+    node_description = (
+        "清空指定工作表中的单元格内容：支持自定义 A1 区域，或按数据表自动检测有值区域。"
+        "输出为普通数据表，不再保留原 Excel 样式。"
+    )
+    node_color = "#64748b"
+
+    def _setup_ports(self):
+        self.add_input("workbook")
+        self.add_output("workbook")
+
+    def get_config_ui_schema(self) -> List[Dict[str, Any]]:
+        return [
+            {
+                "key": "target_scope",
+                "label": "目标工作表",
+                "type": "select",
+                "options": [
+                    {"value": "single", "label": "指定一张工作表"},
+                    {"value": "all", "label": "全部工作表"},
+                ],
+                "default": "single",
+            },
+            {
+                "key": "sheet_name",
+                "label": "工作表名称",
+                "type": "sheet_selector",
+                "dependency": "__upstream__",
+                "placeholder": "选择或输入要清理的工作表",
+            },
+            {
+                "key": "clear_mode",
+                "label": "清理范围",
+                "type": "select",
+                "options": [
+                    {"value": "custom", "label": "自定义 (A1 区域)"},
+                    {"value": "used_range", "label": "自动检测有值区域"},
+                    {"value": "all_data", "label": "整张表数据 (保留列标题行)"},
+                    {"value": "all_with_header", "label": "整张表含列标题"},
+                ],
+                "default": "used_range",
+            },
+            {
+                "key": "range_a1",
+                "label": "Excel 区域 (如 B2:Z99)",
+                "type": "text",
+                "default": "",
+                "placeholder": "仅“自定义”模式需要，例如 A2:H100",
+            },
+        ]
+
+    def validate(self) -> tuple[bool, str]:
+        if self.get_param("target_scope", "single") == "single":
+            if not (self.get_param("sheet_name") or "").strip():
+                return False, "请指定要清理的工作表名称"
+        mode = self.get_param("clear_mode", "used_range")
+        if mode == "custom":
+            if not (self.get_param("range_a1") or "").strip():
+                return False, "自定义模式请填写 Excel 区域"
+        return True, ""
+
+    @staticmethod
+    def _workbook_item_to_dataframe(item: Any) -> pd.DataFrame:
+        if isinstance(item, pd.DataFrame):
+            return item.copy()
+        if isinstance(item, StyledSheet):
+            df0 = item.df_filtered
+            if df0 is not None and (len(df0) > 0 or len(df0.columns) > 0):
+                return df0.copy()
+            return read_excel_with_engine(
+                item.file_path,
+                sheet_name=item.sheet_name,
+                header=item.header_row,
+                dtype=object,
+            )
+        if isinstance(item, list):
+            if not item:
+                return pd.DataFrame()
+            dfs: List[pd.DataFrame] = []
+            for x in item:
+                dfs.append(SheetClearRangeNode._workbook_item_to_dataframe(x))
+            return pd.concat(dfs, ignore_index=True)
+        raise ValueError(f"无法清理此类型的工作表数据: {type(item).__name__}")
+
+    def execute(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
+        workbook = input_data.get("workbook")
+        if workbook is None:
+            raise ValueError("没有接收到工作簿数据")
+        workbook = dict(workbook)
+
+        target_scope = self.get_param("target_scope", "single")
+        sheet_name_param = (self.get_param("sheet_name") or "").strip()
+        clear_mode = self.get_param("clear_mode", "used_range")
+        range_a1 = (self.get_param("range_a1") or "").strip()
+
+        if target_scope == "single":
+            if not sheet_name_param:
+                raise ValueError("请指定工作表名称")
+            keys = [sheet_name_param]
+            for k in keys:
+                if k not in workbook:
+                    raise ValueError(f"工作簿中没有名为「{k}」的工作表")
+        else:
+            keys = list(workbook.keys())
+
+        for key in keys:
+            item = workbook[key]
+            try:
+                df = self._workbook_item_to_dataframe(item)
+            except ValueError as e:
+                raise ValueError(f"[{key}] {e}") from e
+
+            df = clean_unnamed_columns(df)
+            nrows = len(df)
+            ncols = len(df.columns)
+
+            if clear_mode == "custom":
+                min_r, max_r, min_c, max_c = parse_a1_range(range_a1)
+                clear_headers = min_r <= 1 <= max_r
+                cleared = clear_dataframe_excel_range(
+                    df, min_r, max_r, min_c, max_c, clear_header_cells=clear_headers,
+                )
+            elif clear_mode == "used_range":
+                min_r, max_r, min_c, max_c = detect_used_range_from_dataframe(df)
+                if ncols == 0 or (min_r, max_r, min_c, max_c) == (1, 1, 1, 1) and nrows == 0:
+                    cleared = df
+                else:
+                    clear_headers = min_r <= 1
+                    cleared = clear_dataframe_excel_range(
+                        df, min_r, max_r, min_c, max_c, clear_header_cells=clear_headers,
+                    )
+            elif clear_mode == "all_data":
+                if ncols == 0:
+                    cleared = df
+                elif nrows == 0:
+                    cleared = df
+                else:
+                    cleared = clear_dataframe_excel_range(
+                        df, 2, 1 + nrows, 1, ncols, clear_header_cells=False,
+                    )
+            elif clear_mode == "all_with_header":
+                if ncols == 0:
+                    cleared = df
+                else:
+                    last_excel_row = 1 + nrows
+                    cleared = clear_dataframe_excel_range(
+                        df, 1, last_excel_row, 1, ncols, clear_header_cells=True,
+                    )
+            else:
+                raise ValueError(f"未知的清理模式: {clear_mode}")
+
+            workbook[key] = clean_unnamed_columns(cleared)
+            self.report_progress(
+                f"已清理「{key}」: 模式={clear_mode}, 形状={len(workbook[key])}×{len(workbook[key].columns)}",
+            )
+
         return {"workbook": workbook}
 
 
