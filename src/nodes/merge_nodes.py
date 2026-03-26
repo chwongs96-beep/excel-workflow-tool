@@ -975,9 +975,15 @@ class WorkbookSaveNode(BaseNode):
                         handled_sheets.add(sanitized)
                         continue
 
-                    # Not original — generate a unique name that avoids
-                    # collisions with both template sheets and earlier entries.
-                    safe_name = make_unique_sheet_name(sheet_name, used_names)
+                    # Not original: if a sheet with this name already exists in the
+                    # template, we overwrite it and must keep the same name.
+                    # Calling make_unique_sheet_name here would wrongly produce
+                    # e.g. Sheet1_1 because *sanitized* is already in used_names.
+                    if sanitized in wb.sheetnames:
+                        safe_name = sanitized
+                    else:
+                        safe_name = make_unique_sheet_name(sheet_name, used_names)
+
                     used_names.add(safe_name)
                     handled_sheets.add(safe_name)
 
