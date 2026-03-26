@@ -6,6 +6,8 @@ excel_nodes.py and merge_nodes.py.
 """
 
 import re
+
+import numpy as np
 import pandas as pd
 from pathlib import Path
 from typing import Any, List, Optional, Tuple
@@ -459,10 +461,19 @@ def detect_used_range_from_dataframe(df: pd.DataFrame) -> Tuple[int, int, int, i
         if _df_cell_has_content(col):
             touch(1, j + 1)
 
-    for i in range(nrows):
-        for j in range(ncols):
-            if _df_cell_has_content(df.iat[i, j]):
-                touch(i + 2, j + 1)
+    if nrows > 0 and ncols > 0:
+        arr = df.to_numpy(dtype=object, copy=False)
+        vm = np.vectorize(_df_cell_has_content, otypes=[bool])(arr)
+        if vm.any():
+            r_idx, c_idx = np.nonzero(vm)
+            bmin_r = int(r_idx.min()) + 2
+            bmax_r = int(r_idx.max()) + 2
+            bmin_c = int(c_idx.min()) + 1
+            bmax_c = int(c_idx.max()) + 1
+            touch(bmin_r, bmin_c)
+            touch(bmin_r, bmax_c)
+            touch(bmax_r, bmin_c)
+            touch(bmax_r, bmax_c)
 
     if min_r is None:
         return (1, 1, 1, 1)
@@ -483,6 +494,8 @@ def clear_dataframe_excel_range(
 
     Row **1** is treated as column headers: when *clear_header_cells* is true,
     affected header positions are set to empty strings.  Data rows start at **2**.
+
+    Uses block assignment on ``.iloc`` instead of per-cell ``iat`` for performance.
     """
     out = df.copy()
     nrows = len(out)
@@ -500,14 +513,30 @@ def clear_dataframe_excel_range(
         return out
 
     new_cols = list(out.columns)
-    for r_ex in range(min_row, max_row + 1):
+    if clear_header_cells and min_row <= 1 <= max_row:
         for c_ex in range(min_col, max_col + 1):
-            if r_ex == 1:
-                if clear_header_cells:
-                    new_cols[c_ex - 1] = ""
-            else:
-                ri = r_ex - 2
-                if 0 <= ri < nrows:
-                    out.iat[ri, c_ex - 1] = pd.NA
+            if 1 <= c_ex <= ncols:
+                new_cols[c_ex - 1] = ""
     out.columns = pd.Index(new_cols)
+
+    r_ex_start = max(min_row, 2)
+    r_ex_end = min(max_row, last_data_excel_row)
+    if r_ex_start <= r_ex_end:
+        i0 = r_ex_start - 2
+        i1 = r_ex_end - 2
+        c0 = min_col - 1
+        c1 = max_col
+        i0 = max(0, min(i0, nrows - 1))
+        i1 = max(0, min(i1, nrows - 1))
+        c0 = max(0, min(c0, ncols - 1))
+        c1 = max(0, min(c1, ncols))
+        if i0 <= i1 and c0 < c1:
+            # Integer/bool/float columns cannot hold NA/None via iloc; promote the
+            # affected columns to object once, then assign None (empty cells).
+            for ci in range(c0, c1):
+                cname = out.columns[ci]
+                if out[cname].dtype != object:
+                    out[cname] = out[cname].astype(object)
+            out.iloc[i0 : i1 + 1, c0:c1] = None
+
     return out

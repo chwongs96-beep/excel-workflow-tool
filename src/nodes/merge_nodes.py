@@ -931,12 +931,13 @@ class SheetClearRangeNode(BaseNode):
 
     @staticmethod
     def _workbook_item_to_dataframe(item: Any) -> pd.DataFrame:
+        # No copy for plain DataFrame: clear_dataframe_excel_range copies internally.
         if isinstance(item, pd.DataFrame):
-            return item.copy()
+            return item
         if isinstance(item, StyledSheet):
             df0 = item.df_filtered
             if df0 is not None and (len(df0) > 0 or len(df0.columns) > 0):
-                return df0.copy()
+                return df0
             return read_excel_with_engine(
                 item.file_path,
                 sheet_name=item.sheet_name,
@@ -980,7 +981,6 @@ class SheetClearRangeNode(BaseNode):
             except ValueError as e:
                 raise ValueError(f"[{key}] {e}") from e
 
-            df = clean_unnamed_columns(df)
             nrows = len(df)
             ncols = len(df.columns)
 
@@ -992,25 +992,23 @@ class SheetClearRangeNode(BaseNode):
                 )
             elif clear_mode == "used_range":
                 min_r, max_r, min_c, max_c = detect_used_range_from_dataframe(df)
-                if ncols == 0 or (min_r, max_r, min_c, max_c) == (1, 1, 1, 1) and nrows == 0:
-                    cleared = df
+                if ncols == 0 or ((min_r, max_r, min_c, max_c) == (1, 1, 1, 1) and nrows == 0):
+                    cleared = df.copy()
                 else:
                     clear_headers = min_r <= 1
                     cleared = clear_dataframe_excel_range(
                         df, min_r, max_r, min_c, max_c, clear_header_cells=clear_headers,
                     )
             elif clear_mode == "all_data":
-                if ncols == 0:
-                    cleared = df
-                elif nrows == 0:
-                    cleared = df
+                if ncols == 0 or nrows == 0:
+                    cleared = df.copy()
                 else:
                     cleared = clear_dataframe_excel_range(
                         df, 2, 1 + nrows, 1, ncols, clear_header_cells=False,
                     )
             elif clear_mode == "all_with_header":
                 if ncols == 0:
-                    cleared = df
+                    cleared = df.copy()
                 else:
                     last_excel_row = 1 + nrows
                     cleared = clear_dataframe_excel_range(
