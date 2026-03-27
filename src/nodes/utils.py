@@ -619,3 +619,53 @@ def trim_dataframe_blank_edges(
         if not col_ok.all():
             out = out.loc[:, col_ok]
     return out
+
+
+def drop_fully_empty_rows_in_excel_row_span(
+    df: pd.DataFrame,
+    min_excel_row: int,
+    max_excel_row: int,
+) -> pd.DataFrame:
+    """Drop *data* rows (Excel row >= 2) inside the inclusive Excel row span
+    that are entirely empty — mimics shifting remaining content upward after a
+    row band was cleared."""
+    nrows = len(df)
+    if nrows == 0:
+        return df
+    lo = max(int(min_excel_row), 2)
+    hi = min(int(max_excel_row), 1 + nrows)
+    if lo > hi:
+        return df
+    i0 = lo - 2
+    i1 = hi - 2
+    arr = df.iloc[i0 : i1 + 1].to_numpy(dtype=object, copy=False)
+    nonempty = np.vectorize(_df_cell_has_content)(arr).any(axis=1)
+    drop_offset = np.flatnonzero(~nonempty)
+    if drop_offset.size == 0:
+        return df
+    drop_idx = df.index[drop_offset + i0]
+    return df.drop(drop_idx).reset_index(drop=True)
+
+
+def drop_fully_empty_columns_in_excel_col_span(
+    df: pd.DataFrame,
+    min_excel_col: int,
+    max_excel_col: int,
+) -> pd.DataFrame:
+    """Drop columns whose 1-based Excel index lies in the inclusive column band
+    and are entirely empty — mimics shifting content leftward."""
+    ncols = len(df.columns)
+    if ncols == 0:
+        return df
+    lo = max(int(min_excel_col), 1)
+    hi = min(int(max_excel_col), ncols)
+    if lo > hi:
+        return df
+    drop_names: List[Any] = []
+    for j in range(lo - 1, hi):
+        col = df.iloc[:, j]
+        if not np.vectorize(_df_cell_has_content)(col.to_numpy()).any():
+            drop_names.append(df.columns[j])
+    if not drop_names:
+        return df
+    return df.drop(columns=drop_names, errors="ignore")

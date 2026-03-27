@@ -2,12 +2,12 @@
 Node Configuration Panel - UI for configuring node parameters
 """
 
-from typing import Optional
+from typing import Optional, Dict, Any, List
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QFormLayout,
     QLabel, QLineEdit, QTextEdit, QSpinBox, QDoubleSpinBox,
     QComboBox, QCheckBox, QPushButton, QFileDialog,
-    QScrollArea, QFrame, QSizePolicy, QMessageBox, QToolButton
+    QScrollArea, QFrame, QSizePolicy, QMessageBox, QToolButton, QGroupBox
 )
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QColor
@@ -114,6 +114,14 @@ class NodeConfigPanel(QWidget):
         self.desc_label.setWordWrap(True)
         self.desc_label.setStyleSheet("color: #888888; padding: 5px;")
         layout.addWidget(self.desc_label)
+
+        self.wiring_label = QLabel("")
+        self.wiring_label.setWordWrap(True)
+        self.wiring_label.setStyleSheet(
+            "color: #81c784; padding: 4px 5px; font-size: 11px;"
+        )
+        self.wiring_label.hide()
+        layout.addWidget(self.wiring_label)
         
         # Separator
         line = QFrame()
@@ -127,9 +135,9 @@ class NodeConfigPanel(QWidget):
         scroll.setFrameShape(QFrame.Shape.NoFrame)
         
         self.config_widget = QWidget()
-        self.config_layout = QFormLayout(self.config_widget)
-        self.config_layout.setContentsMargins(5, 10, 5, 10)
-        self.config_layout.setSpacing(10)
+        self.config_root_layout = QVBoxLayout(self.config_widget)
+        self.config_root_layout.setContentsMargins(5, 10, 5, 10)
+        self.config_root_layout.setSpacing(10)
         
         scroll.setWidget(self.config_widget)
         layout.addWidget(scroll, 1)
@@ -154,14 +162,23 @@ class NodeConfigPanel(QWidget):
         )
         
         self.desc_label.setText(node.node_description)
+        hint = getattr(node, "node_wiring_hint", "") or ""
+        if hint.strip():
+            self.wiring_label.setText(f"典型接线：{hint.strip()}")
+            self.wiring_label.show()
+        else:
+            self.wiring_label.hide()
         self.placeholder.hide()
         self.help_btn.show()  # Show help button when node is selected
         self.run_btn.show()   # Show run button
         
         # Create config fields
         schema = node.get_config_ui_schema()
+        self._schema_by_key = {f["key"]: f for f in schema if "key" in f}
         for field in schema:
             self._create_field(field)
+        self._connect_visibility_triggers()
+        self._refresh_conditional_visibility()
     
     def clear(self):
         """Clear the panel"""
@@ -170,18 +187,94 @@ class NodeConfigPanel(QWidget):
         self.header_label.setText("未选择节点")
         self.header_label.setStyleSheet("font-size: 14px; font-weight: bold; padding: 5px;")
         self.desc_label.setText("")
+        self.wiring_label.hide()
         self.placeholder.show()
         self.help_btn.hide()  # Hide help button when no node selected
         self.run_btn.hide()   # Hide run button
     
     def _clear_config_fields(self):
         """Clear all config fields"""
-        while self.config_layout.count():
-            item = self.config_layout.takeAt(0)
+        while self.config_root_layout.count():
+            item = self.config_root_layout.takeAt(0)
             widget = item.widget()
             if widget:
                 widget.deleteLater()
         self.field_widgets.clear()
+        self.field_labels.clear()
+        self._schema_by_key.clear()
+        self._root_form = None
+        self._section_forms.clear()
+
+    def _get_form_for_field(self, field: dict) -> QFormLayout:
+        """Return QFormLayout for field (optional section -> QGroupBox)."""
+        section = field.get("section")
+        if not section:
+            if self._root_form is None:
+                holder = QWidget()
+                self._root_form = QFormLayout(holder)
+                self._root_form.setContentsMargins(0, 0, 0, 0)
+                self._root_form.setSpacing(10)
+                self.config_root_layout.addWidget(holder)
+            return self._root_form
+        if section not in self._section_forms:
+            group = QGroupBox(section)
+            form = QFormLayout(group)
+            form.setContentsMargins(8, 12, 8, 8)
+            form.setSpacing(10)
+            self.config_root_layout.addWidget(group)
+            self._section_forms[section] = form
+        return self._section_forms[section]
+
+    def _collect_dep_widget_line_edits(self, dep_key: str) -> List[QLineEdit]:
+        dep_w = self.field_widgets.get(dep_key)
+        if not dep_w:
+            return []
+        return dep_w.findChildren(QLineEdit)
+
+    def _connect_visibility_triggers(self):
+        """When visible_when deps change, refresh row visibility."""
+        dep_keys: set = set()
+        for field in self._schema_by_key.values():
+            rule = field.get("visible_when")
+            if rule and rule.get("key"):
+                dep_keys.add(rule["key"])
+        for dk in dep_keys:
+            for le in self._collect_dep_widget_line_edits(dk):
+                le.textChanged.connect(lambda _t: self._refresh_conditional_visibility())
+            dep_w = self.field_widgets.get(dk)
+            if dep_w:
+                for cb in dep_w.findChildren(QComboBox):
+                    cb.currentIndexChanged.connect(
+                        lambda _i: self._refresh_conditional_visibility()
+                    )
+
+    def _refresh_conditional_visibility(self):
+        if not self.node:
+            return
+        for key, field in self._schema_by_key.items():
+            rule = field.get("visible_when")
+            label_w = self.field_labels.get(key)
+            val_w = self.field_widgets.get(key)
+            if not rule:
+                if label_w:
+                    label_w.show()
+                if val_w:
+                    val_w.show()
+                continue
+            dep = rule.get("key")
+            suf = rule.get("path_suffix")
+            eq = rule.get("equals")
+            visible = True
+            if dep and suf is not None:
+                raw = self.node.get_param(dep) or ""
+                path = str(raw).strip().lower()
+                visible = path.endswith(str(suf).lower())
+            elif dep and eq is not None:
+                visible = self.node.get_param(dep) == eq
+            if label_w:
+                label_w.setVisible(visible)
+            if val_w:
+                val_w.setVisible(visible)
     
     def _find_upstream_file_path(self) -> Optional[str]:
         """Find file path from upstream nodes recursively"""
@@ -261,6 +354,7 @@ class NodeConfigPanel(QWidget):
         field_type = field.get("type", "text")
         default = field.get("default", "")
         current_value = self.node.get_param(key, default)
+        form = self._get_form_for_field(field)
         
         # Auto-fill file path from upstream if empty
         if not current_value and field_type == "file" and self.workflow:
@@ -317,6 +411,18 @@ class NodeConfigPanel(QWidget):
             widget.currentIndexChanged.connect(
                 lambda _, k=key, w=widget: self._on_value_changed(k, w.currentData())
             )
+            danger_vals = field.get("danger_values")
+            if danger_vals:
+                def _update_danger_label():
+                    cur = widget.currentData()
+                    if cur in danger_vals:
+                        label_widget.setStyleSheet(
+                            "color: #ff9800; font-weight: bold;"
+                        )
+                    else:
+                        label_widget.setStyleSheet("")
+                widget.currentIndexChanged.connect(lambda _i: _update_danger_label())
+                _update_danger_label()
         
         elif field_type == "checkbox":
             widget = QCheckBox()
@@ -551,6 +657,7 @@ class NodeConfigPanel(QWidget):
         if self.node:
             self.node.set_param(key, value)
             self.config_changed.emit()
+            self._refresh_conditional_visibility()
     
     def _browse_file(self, key: str, line_edit: QLineEdit, field: dict):
         """Open file browser"""

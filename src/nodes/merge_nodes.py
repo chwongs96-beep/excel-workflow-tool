@@ -2,7 +2,7 @@ import shutil
 import warnings
 from copy import copy as copy_obj
 from pathlib import Path
-from typing import Any, Dict, List, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import openpyxl
 import openpyxl.styles
@@ -18,6 +18,8 @@ from .utils import (
     detect_used_range,
     detect_used_range_from_dataframe,
     detect_used_range_from_xlsx_sheet,
+    drop_fully_empty_columns_in_excel_col_span,
+    drop_fully_empty_rows_in_excel_row_span,
     get_excel_file,
     make_unique_sheet_name,
     normalize_dataframe_for_excel,
@@ -523,6 +525,11 @@ class SheetCopyNode(BaseNode):
     node_name = "复制/合并数据"
     node_category = "灵活合并"
     node_description = "将Excel/CSV数据复制到工作簿，支持列映射和空值检查（注意：.xls格式不支持样式保留）"
+    node_wiring_hint = (
+        "左侧「workbook」接入上游工作簿（如合并/起始工作簿）；"
+        "「file_path」可接线路或在本面板选择来源文件。"
+        "输出「workbook」接保存或其它合并类节点。"
+    )
     node_color = "#f59e0b"  # Amber
     
     def _setup_ports(self):
@@ -536,6 +543,7 @@ class SheetCopyNode(BaseNode):
                 "key": "file_path",
                 "label": "来源文件",
                 "type": "file",
+                "section": "来源",
                 "file_filter": "Excel/CSV文件 (*.xlsx *.xls *.csv)",
                 "required": True,
                 "placeholder": "请选择来源文件 (或连接输入节点)"
@@ -544,6 +552,7 @@ class SheetCopyNode(BaseNode):
                 "key": "sheet_name",
                 "label": "来源工作表 (Excel)",
                 "type": "sheet_selector",
+                "section": "来源",
                 "dependency": "file_path",
                 "default": "",
                 "placeholder": "CSV文件可忽略此项"
@@ -552,6 +561,7 @@ class SheetCopyNode(BaseNode):
                 "key": "csv_delimiter",
                 "label": "CSV分隔符 (仅CSV)",
                 "type": "select",
+                "section": "来源",
                 "options": [
                     {"value": "auto", "label": "自动检测"},
                     {"value": "comma", "label": "逗号 (,)"},
@@ -560,24 +570,28 @@ class SheetCopyNode(BaseNode):
                     {"value": "pipe", "label": "竖线 (|)"},
                     {"value": "space", "label": "空格"}
                 ],
-                "default": "auto"
+                "default": "auto",
+                "visible_when": {"key": "file_path", "path_suffix": ".csv"}
             },
             {
                 "key": "csv_encoding",
                 "label": "CSV编码 (仅CSV)",
                 "type": "select",
+                "section": "来源",
                 "options": [
                     {"value": "auto", "label": "自动检测"},
                     {"value": "utf-8", "label": "UTF-8"},
                     {"value": "gbk", "label": "GBK/GB18030"},
                     {"value": "utf-8-sig", "label": "UTF-8-SIG"}
                 ],
-                "default": "auto"
+                "default": "auto",
+                "visible_when": {"key": "file_path", "path_suffix": ".csv"}
             },
             {
                 "key": "header_row",
                 "label": "标题所在行 (从0开始)",
                 "type": "number",
+                "section": "来源",
                 "default": 0,
                 "min": 0
             },
@@ -585,6 +599,7 @@ class SheetCopyNode(BaseNode):
                 "key": "target_sheet",
                 "label": "目标工作表名称",
                 "type": "sheet_selector",
+                "section": "目标工作簿",
                 "dependency": "__upstream__",
                 "required": True,
                 "placeholder": "选择或输入目标工作表名称"
@@ -593,6 +608,7 @@ class SheetCopyNode(BaseNode):
                 "key": "copy_mode",
                 "label": "复制模式",
                 "type": "select",
+                "section": "写入与选项",
                 "options": [
                     {"value": "whole", "label": "整页复制"},
                     {"value": "used_range", "label": "自动检测有值区域"},
@@ -605,47 +621,55 @@ class SheetCopyNode(BaseNode):
                 "key": "quick_mode",
                 "label": "⚡ 快速模式(推荐)",
                 "type": "checkbox",
+                "section": "写入与选项",
                 "default": True
             },
             {
                 "key": "column_mapping",
                 "label": "列映射 (仅指定列模式)",
                 "type": "text",
+                "section": "写入与选项",
                 "placeholder": "格式: 源列A=目标列B; 源列C=目标列D"
             },
             {
                 "key": "filter_query",
                 "label": "行过滤条件 (Pandas Query)",
                 "type": "text",
+                "section": "写入与选项",
                 "placeholder": "例如: 状态 == '完成' and 金额 > 1000"
             },
             {
                 "key": "remove_duplicates",
                 "label": "去除重复行",
                 "type": "checkbox",
+                "section": "写入与选项",
                 "default": False
             },
             {
                 "key": "strip_whitespace",
                 "label": "去除文本首尾空格",
                 "type": "checkbox",
+                "section": "写入与选项",
                 "default": True
             },
             {
                 "key": "preserve_formatting",
                 "label": "保留原始Excel格式 (较慢)",
                 "type": "checkbox",
+                "section": "写入与选项",
                 "default": True
             },
             {
                 "key": "write_mode",
                 "label": "写入方式",
                 "type": "select",
+                "section": "写入与选项",
                 "options": [
                     {"value": "overwrite", "label": "覆盖目标表"},
                     {"value": "append", "label": "追加到末尾"}
                 ],
-                "default": "overwrite"
+                "default": "overwrite",
+                "danger_values": ["overwrite"]
             }
         ]
     
@@ -873,6 +897,99 @@ class SheetCopyNode(BaseNode):
         return {"workbook": workbook}
 
 
+def workbook_entry_to_dataframe(item: Any) -> pd.DataFrame:
+    """Resolve a workbook entry to a DataFrame (no copy for plain DataFrame)."""
+    if isinstance(item, pd.DataFrame):
+        return item
+    if isinstance(item, StyledSheet):
+        df0 = item.df_filtered
+        if df0 is not None and (len(df0) > 0 or len(df0.columns) > 0):
+            return df0
+        return read_excel_with_engine(
+            item.file_path,
+            sheet_name=item.sheet_name,
+            header=item.header_row,
+            dtype=object,
+        )
+    if isinstance(item, list):
+        if not item:
+            return pd.DataFrame()
+        dfs: List[pd.DataFrame] = []
+        for x in item:
+            dfs.append(workbook_entry_to_dataframe(x))
+        return pd.concat(dfs, ignore_index=True)
+    raise ValueError(f"无法清理此类型的工作表数据: {type(item).__name__}")
+
+
+def run_sheet_clear_core(
+    df: pd.DataFrame,
+    item: Any,
+    *,
+    clear_mode: str,
+    range_a1: str,
+    prefer_excel: bool,
+    preserve_formulas: bool,
+) -> Tuple[pd.DataFrame, Optional[Tuple[int, int, int, int]], str]:
+    """Clear *df*; optionally restore formulas. No edge trim. Returns bounds when known."""
+    nrows = len(df)
+    ncols = len(df.columns)
+    df_orig_formulas = df.copy() if preserve_formulas else None
+    bounds_note = ""
+    bounds: Optional[Tuple[int, int, int, int]] = None
+
+    if clear_mode == "custom":
+        min_r, max_r, min_c, max_c = parse_a1_range(range_a1)
+        bounds = (min_r, max_r, min_c, max_c)
+        clear_headers = min_r <= 1 <= max_r
+        cleared = clear_dataframe_excel_range(
+            df, min_r, max_r, min_c, max_c, clear_header_cells=clear_headers,
+        )
+    elif clear_mode == "used_range":
+        native_bounds = None
+        if prefer_excel and isinstance(item, StyledSheet):
+            native_bounds = detect_used_range_from_xlsx_sheet(
+                item.file_path, item.sheet_name,
+            )
+        if native_bounds is not None:
+            min_r, max_r, min_c, max_c = native_bounds
+            bounds_note = " (范围:源xlsx)"
+        else:
+            min_r, max_r, min_c, max_c = detect_used_range_from_dataframe(df)
+            bounds_note = " (范围:数据表)"
+        bounds = (min_r, max_r, min_c, max_c)
+        if ncols == 0 or ((min_r, max_r, min_c, max_c) == (1, 1, 1, 1) and nrows == 0):
+            cleared = df.copy()
+        else:
+            clear_headers = min_r <= 1
+            cleared = clear_dataframe_excel_range(
+                df, min_r, max_r, min_c, max_c, clear_header_cells=clear_headers,
+            )
+    elif clear_mode == "all_data":
+        if ncols == 0 or nrows == 0:
+            cleared = df.copy()
+        else:
+            bounds = (2, 1 + nrows, 1, ncols)
+            cleared = clear_dataframe_excel_range(
+                df, 2, 1 + nrows, 1, ncols, clear_header_cells=False,
+            )
+    elif clear_mode == "all_with_header":
+        if ncols == 0:
+            cleared = df.copy()
+        else:
+            last_excel_row = 1 + nrows
+            bounds = (1, last_excel_row, 1, ncols)
+            cleared = clear_dataframe_excel_range(
+                df, 1, last_excel_row, 1, ncols, clear_header_cells=True,
+            )
+    else:
+        raise ValueError(f"未知的清理模式: {clear_mode}")
+
+    if preserve_formulas and df_orig_formulas is not None:
+        cleared = restore_formula_cells(df_orig_formulas, cleared)
+
+    return cleared, bounds, bounds_note
+
+
 @register_node
 class SheetClearRangeNode(BaseNode):
     """Clear cell contents in workbook sheets (DataFrame grid: row 1 = headers)."""
@@ -1021,27 +1138,7 @@ class SheetClearRangeNode(BaseNode):
 
     @staticmethod
     def _workbook_item_to_dataframe(item: Any) -> pd.DataFrame:
-        # No copy for plain DataFrame: clear_dataframe_excel_range copies internally.
-        if isinstance(item, pd.DataFrame):
-            return item
-        if isinstance(item, StyledSheet):
-            df0 = item.df_filtered
-            if df0 is not None and (len(df0) > 0 or len(df0.columns) > 0):
-                return df0
-            return read_excel_with_engine(
-                item.file_path,
-                sheet_name=item.sheet_name,
-                header=item.header_row,
-                dtype=object,
-            )
-        if isinstance(item, list):
-            if not item:
-                return pd.DataFrame()
-            dfs: List[pd.DataFrame] = []
-            for x in item:
-                dfs.append(SheetClearRangeNode._workbook_item_to_dataframe(x))
-            return pd.concat(dfs, ignore_index=True)
-        raise ValueError(f"无法清理此类型的工作表数据: {type(item).__name__}")
+        return workbook_entry_to_dataframe(item)
 
     def execute(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
         workbook = input_data.get("workbook")
@@ -1077,61 +1174,18 @@ class SheetClearRangeNode(BaseNode):
         for key in keys:
             item = workbook[key]
             try:
-                df = self._workbook_item_to_dataframe(item)
+                df = workbook_entry_to_dataframe(item)
             except ValueError as e:
                 raise ValueError(f"[{key}] {e}") from e
 
-            nrows = len(df)
-            ncols = len(df.columns)
-            df_orig_formulas = df.copy() if preserve_formulas else None
-            bounds_note = ""
-
-            if clear_mode == "custom":
-                min_r, max_r, min_c, max_c = parse_a1_range(range_a1)
-                clear_headers = min_r <= 1 <= max_r
-                cleared = clear_dataframe_excel_range(
-                    df, min_r, max_r, min_c, max_c, clear_header_cells=clear_headers,
-                )
-            elif clear_mode == "used_range":
-                native_bounds = None
-                if prefer_excel and isinstance(item, StyledSheet):
-                    native_bounds = detect_used_range_from_xlsx_sheet(
-                        item.file_path, item.sheet_name,
-                    )
-                if native_bounds is not None:
-                    min_r, max_r, min_c, max_c = native_bounds
-                    bounds_note = " (范围:源xlsx)"
-                else:
-                    min_r, max_r, min_c, max_c = detect_used_range_from_dataframe(df)
-                    bounds_note = " (范围:数据表)"
-
-                if ncols == 0 or ((min_r, max_r, min_c, max_c) == (1, 1, 1, 1) and nrows == 0):
-                    cleared = df.copy()
-                else:
-                    clear_headers = min_r <= 1
-                    cleared = clear_dataframe_excel_range(
-                        df, min_r, max_r, min_c, max_c, clear_header_cells=clear_headers,
-                    )
-            elif clear_mode == "all_data":
-                if ncols == 0 or nrows == 0:
-                    cleared = df.copy()
-                else:
-                    cleared = clear_dataframe_excel_range(
-                        df, 2, 1 + nrows, 1, ncols, clear_header_cells=False,
-                    )
-            elif clear_mode == "all_with_header":
-                if ncols == 0:
-                    cleared = df.copy()
-                else:
-                    last_excel_row = 1 + nrows
-                    cleared = clear_dataframe_excel_range(
-                        df, 1, last_excel_row, 1, ncols, clear_header_cells=True,
-                    )
-            else:
-                raise ValueError(f"未知的清理模式: {clear_mode}")
-
-            if preserve_formulas and df_orig_formulas is not None:
-                cleared = restore_formula_cells(df_orig_formulas, cleared)
+            cleared, _bounds, bounds_note = run_sheet_clear_core(
+                df,
+                item,
+                clear_mode=clear_mode,
+                range_a1=range_a1,
+                prefer_excel=prefer_excel,
+                preserve_formulas=preserve_formulas,
+            )
 
             if trim_rows or trim_cols:
                 cleared = trim_dataframe_blank_edges(
@@ -1144,6 +1198,360 @@ class SheetClearRangeNode(BaseNode):
                 f"形状={len(workbook[key])}×{len(workbook[key].columns)}",
             )
 
+        return {"workbook": workbook}
+
+
+@register_node
+class SheetClearAndShiftNode(BaseNode):
+    """Clear worksheet cells, then drop empty rows/cols in the cleared band (shift up/left)."""
+
+    node_type = "sheet_clear_and_shift"
+    node_name = "智能清理并移位"
+    node_category = "灵活合并"
+    node_description = (
+        "先按范围清空单元格，再在清除带内删除「整行/整列全空」的行与列，使剩余内容上移、左移靠拢；"
+        "支持与「清理工作表内容」相同的范围与智能行为预设，可单独选择移位强度。"
+    )
+    node_color = "#475569"
+
+    def _setup_ports(self):
+        self.add_input("workbook")
+        self.add_output("workbook")
+
+    def get_config_ui_schema(self) -> List[Dict[str, Any]]:
+        return [
+            {
+                "key": "target_scope",
+                "label": "目标工作表",
+                "type": "select",
+                "options": [
+                    {"value": "single", "label": "指定一张工作表"},
+                    {"value": "all", "label": "全部工作表"},
+                ],
+                "default": "single",
+            },
+            {
+                "key": "sheet_name",
+                "label": "工作表名称",
+                "type": "sheet_selector",
+                "dependency": "__upstream__",
+                "placeholder": "选择或输入要处理的工作表",
+            },
+            {
+                "key": "clear_mode",
+                "label": "清理范围",
+                "type": "select",
+                "options": [
+                    {"value": "custom", "label": "自定义 (A1 区域)"},
+                    {"value": "used_range", "label": "自动检测有值区域"},
+                    {"value": "all_data", "label": "整张表数据 (保留列标题行)"},
+                    {"value": "all_with_header", "label": "整张表含列标题"},
+                ],
+                "default": "used_range",
+            },
+            {
+                "key": "range_a1",
+                "label": "Excel 区域 (如 B2:Z99)",
+                "type": "text",
+                "default": "",
+                "placeholder": "仅自定义模式需要",
+            },
+            {
+                "key": "shift_mode",
+                "label": "移位整理",
+                "type": "select",
+                "options": [
+                    {
+                        "value": "band_full",
+                        "label": "智能 — 清除带内删除全空行与全空列（上移+左移）",
+                    },
+                    {
+                        "value": "band_rows",
+                        "label": "仅删除清除带内的全空行（上移）",
+                    },
+                    {
+                        "value": "band_cols",
+                        "label": "仅删除清除带内的全空列（左移）",
+                    },
+                    {"value": "none", "label": "仅清空不移位（等同不做带内删行/列）"},
+                ],
+                "default": "band_full",
+            },
+            {
+                "key": "smart_preset",
+                "label": "智能行为",
+                "type": "select",
+                "options": [
+                    {
+                        "value": "recommended",
+                        "label": "推荐 — 源 xlsx 实测范围 + 保留公式",
+                    },
+                    {
+                        "value": "thorough_cleanup",
+                        "label": "深度 — 推荐 + 表格外再删全空行/列",
+                    },
+                    {
+                        "value": "dataframe_only",
+                        "label": "保守 — 仅用数据表范围 + 保留公式",
+                    },
+                    {
+                        "value": "strict_clear",
+                        "label": "彻底 — 含公式一并清空",
+                    },
+                    {"value": "custom", "label": "自定义 — 下方勾选"},
+                ],
+                "default": "recommended",
+            },
+            {
+                "key": "prefer_excel_used_range",
+                "label": "· 自定义：优先源 Excel 实测区域 (.xlsx)",
+                "type": "checkbox",
+                "default": True,
+            },
+            {
+                "key": "preserve_formulas",
+                "label": "· 自定义：保留公式 (= 开头)",
+                "type": "checkbox",
+                "default": True,
+            },
+            {
+                "key": "trim_blank_rows",
+                "label": "· 自定义：最后删除整张表全空行",
+                "type": "checkbox",
+                "default": False,
+            },
+            {
+                "key": "trim_blank_columns",
+                "label": "· 自定义：最后删除整张表全空列",
+                "type": "checkbox",
+                "default": False,
+            },
+        ]
+
+    def validate(self) -> tuple[bool, str]:
+        if self.get_param("target_scope", "single") == "single":
+            if not (self.get_param("sheet_name") or "").strip():
+                return False, "请指定要处理的工作表名称"
+        mode = self.get_param("clear_mode", "used_range")
+        if mode == "custom":
+            if not (self.get_param("range_a1") or "").strip():
+                return False, "自定义模式请填写 Excel 区域"
+        return True, ""
+
+    def _resolve_smart_options_live(self) -> tuple[bool, bool, bool, bool]:
+        if "smart_preset" not in self.config.params:
+            return (
+                bool(self.get_param("prefer_excel_used_range", True)),
+                bool(self.get_param("preserve_formulas", True)),
+                bool(self.get_param("trim_blank_rows", False)),
+                bool(self.get_param("trim_blank_columns", False)),
+            )
+        preset = str(self.get_param("smart_preset", "recommended") or "recommended")
+        if preset == "custom":
+            return (
+                bool(self.get_param("prefer_excel_used_range", True)),
+                bool(self.get_param("preserve_formulas", True)),
+                bool(self.get_param("trim_blank_rows", False)),
+                bool(self.get_param("trim_blank_columns", False)),
+            )
+        if preset in _SHEET_CLEAR_SMART_PRESETS:
+            return _SHEET_CLEAR_SMART_PRESETS[preset]
+        return (
+            bool(self.get_param("prefer_excel_used_range", True)),
+            bool(self.get_param("preserve_formulas", True)),
+            bool(self.get_param("trim_blank_rows", False)),
+            bool(self.get_param("trim_blank_columns", False)),
+        )
+
+    def execute(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
+        workbook = input_data.get("workbook")
+        if workbook is None:
+            raise ValueError("没有接收到工作簿数据")
+        workbook = dict(workbook)
+
+        target_scope = self.get_param("target_scope", "single")
+        sheet_name_param = (self.get_param("sheet_name") or "").strip()
+        clear_mode = self.get_param("clear_mode", "used_range")
+        range_a1 = (self.get_param("range_a1") or "").strip()
+        shift_mode = self.get_param("shift_mode", "band_full")
+        prefer_excel, preserve_formulas, trim_rows, trim_cols = (
+            self._resolve_smart_options_live()
+        )
+
+        if target_scope == "single":
+            if not sheet_name_param:
+                raise ValueError("请指定工作表名称")
+            keys = [sheet_name_param]
+            for k in keys:
+                if k not in workbook:
+                    raise ValueError(f"工作簿中没有名为「{k}」的工作表")
+        else:
+            keys = list(workbook.keys())
+
+        if "smart_preset" in self.config.params:
+            self.report_progress(
+                f"[清理并移位] 智能: {self.get_param('smart_preset', 'recommended')}, "
+                f"移位={shift_mode}",
+            )
+
+        for key in keys:
+            item = workbook[key]
+            try:
+                df = workbook_entry_to_dataframe(item)
+            except ValueError as e:
+                raise ValueError(f"[{key}] {e}") from e
+
+            cleared, bounds, bounds_note = run_sheet_clear_core(
+                df,
+                item,
+                clear_mode=clear_mode,
+                range_a1=range_a1,
+                prefer_excel=prefer_excel,
+                preserve_formulas=preserve_formulas,
+            )
+
+            if (
+                bounds is not None
+                and shift_mode != "none"
+                and (len(cleared) > 0 or len(cleared.columns) > 0)
+            ):
+                min_r, max_r, min_c, max_c = bounds
+                if shift_mode in ("band_full", "band_rows"):
+                    cleared = drop_fully_empty_rows_in_excel_row_span(
+                        cleared, min_r, max_r,
+                    )
+                if shift_mode in ("band_full", "band_cols"):
+                    cleared = drop_fully_empty_columns_in_excel_col_span(
+                        cleared, min_c, max_c,
+                    )
+
+            if trim_rows or trim_cols:
+                cleared = trim_dataframe_blank_edges(
+                    cleared, trim_rows=trim_rows, trim_cols=trim_cols,
+                )
+
+            workbook[key] = clean_unnamed_columns(cleared)
+            self.report_progress(
+                f"已清理并移位「{key}」: {clear_mode}{bounds_note}, "
+                f"形状={len(workbook[key])}×{len(workbook[key].columns)}",
+            )
+
+        return {"workbook": workbook}
+
+
+def duplicate_workbook_sheet_item(item: Any) -> Any:
+    """Deep copy a workbook value (DataFrame / StyledSheet / list) for a new sheet key."""
+    if isinstance(item, pd.DataFrame):
+        return item.copy()
+    if isinstance(item, StyledSheet):
+        df_part = None
+        if item.df_filtered is not None:
+            df_part = item.df_filtered.copy()
+        return StyledSheet(
+            item.file_path,
+            item.sheet_name,
+            df_part,
+            item.header_row,
+            item.is_full_copy,
+            item.copy_mode,
+        )
+    if isinstance(item, list):
+        return [duplicate_workbook_sheet_item(x) for x in item]
+    raise ValueError(f"无法复制的工作表数据类型: {type(item).__name__}")
+
+
+@register_node
+class WorkbookDuplicateSheetNode(BaseNode):
+    """Copy one sheet tab to another tab in the same in-memory workbook."""
+
+    node_type = "workbook_duplicate_sheet"
+    node_name = "复制到本工作簿另一页"
+    node_category = "灵活合并"
+    node_description = (
+        "将当前工作簿中某一工作表整页复制为另一工作表名称（同一输出工作簿内的另一分页）。"
+        "支持 DataFrame 或带样式的 StyledSheet；写入文件时两页内容彼此独立。"
+    )
+    node_color = "#0ea5e9"
+
+    def _setup_ports(self):
+        self.add_input("workbook")
+        self.add_output("workbook")
+
+    def get_config_ui_schema(self) -> List[Dict[str, Any]]:
+        return [
+            {
+                "key": "source_sheet",
+                "label": "源工作表（要复制的分页）",
+                "type": "sheet_selector",
+                "dependency": "__upstream__",
+                "required": True,
+                "placeholder": "从上游工作簿中选择",
+            },
+            {
+                "key": "target_sheet",
+                "label": "目标工作表名称（新分页）",
+                "type": "text",
+                "required": True,
+                "placeholder": "例如 Sheet2 或 汇总_副本",
+            },
+            {
+                "key": "if_target_exists",
+                "label": "若目标名称已存在",
+                "type": "select",
+                "options": [
+                    {"value": "overwrite", "label": "覆盖该页"},
+                    {"value": "error", "label": "报错并停止"},
+                    {"value": "skip", "label": "跳过（保留原页）"},
+                ],
+                "default": "overwrite",
+            },
+        ]
+
+    def validate(self) -> tuple[bool, str]:
+        if not (self.get_param("source_sheet") or "").strip():
+            return False, "请选择源工作表"
+        if not (self.get_param("target_sheet") or "").strip():
+            return False, "请填写目标工作表名称"
+        return True, ""
+
+    def execute(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
+        workbook = input_data.get("workbook")
+        if workbook is None:
+            raise ValueError("没有接收到工作簿数据")
+        workbook = dict(workbook)
+
+        src = (self.get_param("source_sheet") or "").strip()
+        tgt = (self.get_param("target_sheet") or "").strip()
+        if_exists = self.get_param("if_target_exists", "overwrite")
+
+        if not src or not tgt:
+            raise ValueError("源工作表与目标工作表名称不能为空")
+        if src not in workbook:
+            raise ValueError(f"工作簿中没有名为「{src}」的工作表")
+
+        tgt_clean = sanitize_sheet_name(tgt) or "Sheet"
+        if tgt_clean != tgt:
+            self.report_progress(f"目标名称已规范化: 「{tgt}」→「{tgt_clean}」")
+
+        if src == tgt_clean:
+            self.report_progress("源与目标为同一工作表，无需复制")
+            return {"workbook": workbook}
+
+        existed = tgt_clean in workbook
+        if existed:
+            if if_exists == "error":
+                raise ValueError(f"目标工作表「{tgt_clean}」已存在（若需覆盖请改为覆盖策略）")
+            if if_exists == "skip":
+                self.report_progress(f"已跳过：「{tgt_clean}」已存在")
+                return {"workbook": workbook}
+
+        try:
+            workbook[tgt_clean] = duplicate_workbook_sheet_item(workbook[src])
+        except ValueError as e:
+            raise ValueError(f"复制失败: {e}") from e
+
+        suffix = "（已覆盖原页）" if existed else ""
+        self.report_progress(f"已复制「{src}」→「{tgt_clean}」{suffix}".strip())
         return {"workbook": workbook}
 
 

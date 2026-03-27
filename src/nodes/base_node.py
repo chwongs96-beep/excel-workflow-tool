@@ -36,6 +36,8 @@ class BaseNode:
     node_name: str = "Base Node"
     node_category: str = "General"
     node_description: str = "Base node description"
+    # 简短说明常见端口接线（可选），显示在节点配置面板
+    node_wiring_hint: str = ""
     node_color: str = "#6366f1"  # Default indigo color
     
     def __init__(self, node_id: str):

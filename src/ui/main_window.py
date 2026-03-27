@@ -4,6 +4,7 @@ Main Window - the primary UI for the Excel Workflow Tool
 
 import os
 import sys
+import re
 import json
 import copy
 import uuid
@@ -18,9 +19,10 @@ from PyQt6.QtWidgets import (
     QSplitter, QMenuBar, QMenu, QToolBar, QStatusBar,
     QFileDialog, QMessageBox, QLabel, QPushButton, QDialog,
     QDockWidget, QListWidget, QListWidgetItem, QFrame,
-    QScrollArea, QSizePolicy, QLineEdit, QApplication
+    QScrollArea, QSizePolicy, QLineEdit, QApplication, QPlainTextEdit,
+    QToolButton
 )
-from PyQt6.QtCore import Qt, QSize, QMimeData, QPoint, QSettings
+from PyQt6.QtCore import Qt, QSize, QMimeData, QPoint, QSettings, pyqtSignal
 from PyQt6.QtGui import QAction, QIcon, QDrag, QColor, QPalette, QPixmap, QFont, QPainter
 
 # Add parent directory to path for imports
@@ -90,6 +92,8 @@ class DraggableNodeList(QListWidget):
 
 class NodePalette(QDockWidget):
     """Dock widget containing available nodes"""
+
+    recent_add_requested = pyqtSignal(str)
     
     def __init__(self, parent=None):
         super().__init__("节点列表", parent)
@@ -124,6 +128,19 @@ class NodePalette(QDockWidget):
             }
         """)
         layout.addWidget(self.search_box)
+
+        self.recent_container = QWidget()
+        recent_outer = QVBoxLayout(self.recent_container)
+        recent_outer.setContentsMargins(0, 4, 0, 0)
+        recent_outer.setSpacing(4)
+        rl = QLabel("最近使用：")
+        rl.setStyleSheet("color: #888888; font-size: 11px;")
+        recent_outer.addWidget(rl)
+        self.recent_bar_layout = QHBoxLayout()
+        self.recent_bar_layout.setContentsMargins(0, 0, 0, 0)
+        self.recent_bar_layout.setSpacing(4)
+        recent_outer.addLayout(self.recent_bar_layout)
+        layout.addWidget(self.recent_container)
         
         # Create draggable list widget for nodes
         self.node_list = DraggableNodeList()
@@ -138,6 +155,37 @@ class NodePalette(QDockWidget):
         
         self.setWidget(main_widget)
         self.setMinimumWidth(200)
+        self.refresh_recent_bar()
+    
+    def refresh_recent_bar(self):
+        """从设置中恢复「最近使用」节点快捷按钮。"""
+        while self.recent_bar_layout.count():
+            item = self.recent_bar_layout.takeAt(0)
+            w = item.widget()
+            if w:
+                w.deleteLater()
+        settings = QSettings("Excel Workflow Tool", "Settings")
+        recent = settings.value("recent_node_types", []) or []
+        if not recent:
+            self.recent_container.hide()
+            return
+        added = 0
+        for nt in recent:
+            node_class = NodeRegistry.get_node_class(nt)
+            if not node_class:
+                continue
+            btn = QToolButton()
+            btn.setText(node_class.node_name)
+            btn.setToolTip(node_class.node_description)
+            btn.setAutoRaise(True)
+            btn.clicked.connect(lambda _c=False, t=nt: self.recent_add_requested.emit(t))
+            self.recent_bar_layout.addWidget(btn)
+            added += 1
+        if added == 0:
+            self.recent_container.hide()
+            return
+        self.recent_container.show()
+        self.recent_bar_layout.addStretch(1)
     
     def _populate_nodes(self):
         """Populate the node list"""
@@ -334,6 +382,7 @@ class MainWindow(QMainWindow):
         # Node palette (left dock)
         self.node_palette = NodePalette(self)
         self.node_palette.node_list.itemDoubleClicked.connect(self._on_palette_item_double_clicked)
+        self.node_palette.recent_add_requested.connect(self._on_recent_node_quick_add)
         self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self.node_palette)
         
         # Node config panel (right dock)
@@ -350,10 +399,21 @@ class MainWindow(QMainWindow):
         self.preview_panel = DataPreviewPanel()
         self.preview_dock.setWidget(self.preview_panel)
         self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, self.preview_dock)
+
+        self.log_dock = QDockWidget("执行日志", self)
+        self.log_panel = QPlainTextEdit()
+        self.log_panel.setReadOnly(True)
+        self.log_panel.setMaximumBlockCount(8000)
+        self.log_panel.setPlaceholderText("执行工作流后，此处显示各节点进度与 report_progress 输出…")
+        self.log_dock.setWidget(self.log_panel)
+        self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, self.log_dock)
+        self.tabifyDockWidget(self.preview_dock, self.log_dock)
+        self.preview_dock.raise_()
         
         # Set dock sizes
         self.config_dock.setMinimumWidth(280)
         self.preview_dock.setMinimumHeight(200)
+        self.log_dock.setMinimumHeight(160)
     
     def _setup_menu(self):
         """Set up menu bar"""
@@ -484,6 +544,7 @@ class MainWindow(QMainWindow):
         view_menu.addAction(self.node_palette.toggleViewAction())
         view_menu.addAction(self.config_dock.toggleViewAction())
         view_menu.addAction(self.preview_dock.toggleViewAction())
+        view_menu.addAction(self.log_dock.toggleViewAction())
         
         view_menu.addSeparator()
         
@@ -633,6 +694,26 @@ class MainWindow(QMainWindow):
         self.statusbar = QStatusBar()
         self.setStatusBar(self.statusbar)
         self.statusbar.showMessage("就绪")
+
+    def _append_run_log(self, line: str):
+        """追加一行到执行日志（带时间戳）。"""
+        ts = datetime.now().strftime("%H:%M:%S")
+        self.log_panel.appendPlainText(f"[{ts}] {line}")
+        sb = self.log_panel.verticalScrollBar()
+        sb.setValue(sb.maximum())
+
+    def _register_recent_node_type(self, node_type: str):
+        """记录最近使用的节点类型，供左侧面板快捷选取。"""
+        if not node_type:
+            return
+        recent = self._settings.value("recent_node_types", []) or []
+        if not isinstance(recent, list):
+            recent = []
+        if node_type in recent:
+            recent.remove(node_type)
+        recent.insert(0, node_type)
+        self._settings.setValue("recent_node_types", recent[:12])
+        self.node_palette.refresh_recent_bar()
     
     def _apply_dark_theme(self):
         """Apply dark theme to the application"""
@@ -697,11 +778,15 @@ class MainWindow(QMainWindow):
             QListWidget::item:hover {
                 background-color: #3d3d3d;
             }
-            QLineEdit, QTextEdit, QSpinBox, QComboBox {
+            QLineEdit, QTextEdit, QPlainTextEdit, QSpinBox, QComboBox {
                 background-color: #2d2d2d;
                 color: #e0e0e0;
                 border: 1px solid #3d3d3d;
                 padding: 5px;
+            }
+            QPlainTextEdit {
+                font-family: Consolas, 'Cascadia Mono', monospace;
+                font-size: 11px;
             }
             QLabel {
                 color: #e0e0e0;
@@ -816,11 +901,15 @@ class MainWindow(QMainWindow):
             QListWidget::item:hover {
                 background-color: #e8f4ff;
             }
-            QLineEdit, QTextEdit, QSpinBox, QComboBox {
+            QLineEdit, QTextEdit, QPlainTextEdit, QSpinBox, QComboBox {
                 background-color: #ffffff;
                 color: #333333;
                 border: 1px solid #c0c0c0;
                 padding: 5px;
+            }
+            QPlainTextEdit {
+                font-family: Consolas, 'Cascadia Mono', monospace;
+                font-size: 11px;
             }
             QLabel {
                 color: #333333;
@@ -915,6 +1004,20 @@ class MainWindow(QMainWindow):
         self.canvas.toggle_minimap()
         self.statusbar.showMessage("小地图: " + ("显示" if self.canvas._show_minimap else "隐藏"))
     
+    def _on_recent_node_quick_add(self, node_type: str):
+        """从「最近使用」一键在画布中央添加节点。"""
+        try:
+            self._save_state()
+            node = self.workflow.add_node(
+                node_type,
+                (max(40, self.canvas.width() // 2), max(40, self.canvas.height() // 2)),
+            )
+            self.canvas.update()
+            self.statusbar.showMessage(f"已添加节点: {node.node_name}")
+            self._register_recent_node_type(node_type)
+        except Exception as e:
+            QMessageBox.critical(self, "错误", f"添加节点失败: {e}")
+
     def _on_palette_item_double_clicked(self, item):
         """Handle double-click on palette item"""
         try:
@@ -928,6 +1031,7 @@ class MainWindow(QMainWindow):
                 )
                 self.canvas.update()
                 self.statusbar.showMessage(f"已添加节点: {node.node_name}")
+                self._register_recent_node_type(item.node_type)
         except Exception as e:
             QMessageBox.critical(self, "错误", f"添加节点失败: {e}")
     
@@ -940,6 +1044,7 @@ class MainWindow(QMainWindow):
             node = self.workflow.add_node(node_type, (x, y))
             self.canvas.update()
             self.statusbar.showMessage(f"已添加节点: {node.node_name}")
+            self._register_recent_node_type(node_type)
         except Exception as e:
             QMessageBox.critical(self, "错误", f"添加节点失败: {e}")
     
@@ -1125,6 +1230,9 @@ class MainWindow(QMainWindow):
         # Update user params
         self.workflow.global_params = dialog.get_params()
         
+        self.log_panel.clear()
+        self._append_run_log("开始执行工作流…")
+
         self.statusbar.showMessage("正在执行工作流...")
         
         # Generate system params
@@ -1155,6 +1263,10 @@ class MainWindow(QMainWindow):
         if detail_msg:
             msg += f" - {detail_msg}"
         self.statusbar.showMessage(msg)
+        log_line = f"{node_name} ({current}/{total})"
+        if detail_msg:
+            log_line += f" — {detail_msg}"
+        self._append_run_log(log_line)
         
         if node_id:
             # Set previous running nodes to success before setting new one to running
@@ -1188,15 +1300,24 @@ class MainWindow(QMainWindow):
         self.canvas.stop_animation()
         
         self.statusbar.showMessage("工作流执行成功！")
+        self._append_run_log("工作流执行成功。")
         QMessageBox.information(self, "成功", "工作流执行成功！")
     
     def _on_execution_failed(self, error_msg: str):
         """Handle execution failure"""
         self._is_executing = False
         
-        # Clear status on error
-        self.canvas.clear_node_status()
         self.canvas.stop_animation()
+        self._append_run_log(f"错误: {error_msg}")
+
+        self.canvas.clear_node_status()
+        m = re.search(r"Error in node '([^']+)'", error_msg)
+        if m:
+            failed_name = m.group(1)
+            for nid, n in self.workflow.nodes.items():
+                if n.node_name == failed_name:
+                    self.canvas.set_node_status(nid, "error")
+                    break
         
         self.statusbar.showMessage(f"执行失败: {error_msg}")
         QMessageBox.critical(self, "执行错误", error_msg)
@@ -1221,7 +1342,11 @@ class MainWindow(QMainWindow):
         QApplication.processEvents()
         
         try:
-            def progress(current, total, node_name, node_id=None):
+            def progress(current, total, node_name, node_id=None, detail_msg=None):
+                line = f"{node_name} ({current}/{total})"
+                if detail_msg:
+                    line += f" — {detail_msg}"
+                self._append_run_log(line)
                 self.statusbar.showMessage(f"正在执行: {node_name} ({current}/{total})")
                 if node_id:
                     # Set previous running nodes to success before setting new one to running
@@ -1252,10 +1377,12 @@ class MainWindow(QMainWindow):
             self.canvas.stop_animation()
             
             self.statusbar.showMessage(f"节点执行成功: {target_node.node_name}")
+            self._append_run_log(f"单节点执行完成: {target_node.node_name}")
             
         except Exception as e:
             # Stop animation
             self.canvas.stop_animation()
+            self._append_run_log(f"单节点执行失败: {e}")
             self.statusbar.showMessage(f"执行失败: {e}")
             QMessageBox.critical(self, "执行错误", str(e))
 
