@@ -512,12 +512,16 @@ def clear_dataframe_excel_range(
     if max_row < min_row or max_col < min_col:
         return out
 
-    new_cols = list(out.columns)
+    display_names = list(out.columns)
     if clear_header_cells and min_row <= 1 <= max_row:
         for c_ex in range(min_col, max_col + 1):
             if 1 <= c_ex <= ncols:
-                new_cols[c_ex - 1] = ""
-    out.columns = pd.Index(new_cols)
+                display_names[c_ex - 1] = ""
+
+    # Unique internal names so duplicate "" headers do not break assignment, and
+    # we can promote int/bool columns via ``out[nm] = out[nm].astype(object)``.
+    internal = [f"__sheet_clr_{i}" for i in range(ncols)]
+    out.columns = internal
 
     r_ex_start = max(min_row, 2)
     r_ex_end = min(max_row, last_data_excel_row)
@@ -531,12 +535,87 @@ def clear_dataframe_excel_range(
         c0 = max(0, min(c0, ncols - 1))
         c1 = max(0, min(c1, ncols))
         if i0 <= i1 and c0 < c1:
-            # Integer/bool/float columns cannot hold NA/None via iloc; promote the
-            # affected columns to object once, then assign None (empty cells).
             for ci in range(c0, c1):
-                cname = out.columns[ci]
-                if out[cname].dtype != object:
-                    out[cname] = out[cname].astype(object)
+                nm = internal[ci]
+                if not pd.api.types.is_object_dtype(out[nm]):
+                    out[nm] = out[nm].astype(object)
             out.iloc[i0 : i1 + 1, c0:c1] = None
 
+    out.columns = pd.Index(display_names)
+    return out
+
+
+def _cell_looks_like_formula(value: Any) -> bool:
+    return isinstance(value, str) and len(value) > 0 and value.lstrip().startswith("=")
+
+
+def detect_used_range_from_xlsx_sheet(
+    file_path, sheet_name: str,
+) -> Optional[Tuple[int, int, int, int]]:
+    """Like :func:`detect_used_range` but reads a live ``.xlsx`` sheet.
+
+    Uses openpyxl so merged regions extend the bounds (closer to Excel's view).
+    Returns ``None`` if the file is missing, not ``.xlsx``, or the sheet cannot
+    be opened.
+    """
+    try:
+        p = Path(file_path)
+        if not p.is_file() or p.suffix.lower() != ".xlsx":
+            return None
+        import openpyxl
+
+        wb = openpyxl.load_workbook(str(p), data_only=True)
+        try:
+            if sheet_name in wb.sheetnames:
+                ws = wb[sheet_name]
+            else:
+                alt = sanitize_sheet_name(sheet_name)
+                if alt not in wb.sheetnames:
+                    return None
+                ws = wb[alt]
+            return detect_used_range(ws)
+        finally:
+            wb.close()
+    except Exception:
+        return None
+
+
+def restore_formula_cells(original: pd.DataFrame, cleared: pd.DataFrame) -> pd.DataFrame:
+    """Put back cells that look like Excel formulas (strings starting with ``=``).
+
+    Matches cells by **position** only so cleared sheets with blanked headers
+    (e.g. duplicate empty column names) still restore correctly.
+    """
+    if original.shape != cleared.shape:
+        return cleared
+    arr_o = original.to_numpy(dtype=object, copy=False)
+    arr_c = cleared.to_numpy(dtype=object, copy=True)
+    is_f = np.vectorize(_cell_looks_like_formula, otypes=[bool])(arr_o)
+    if not is_f.any():
+        return cleared
+    arr_c = arr_c.copy()
+    arr_c[is_f] = arr_o[is_f]
+    return pd.DataFrame(arr_c, index=cleared.index, columns=cleared.columns)
+
+
+def trim_dataframe_blank_edges(
+    df: pd.DataFrame,
+    *,
+    trim_rows: bool = True,
+    trim_cols: bool = False,
+) -> pd.DataFrame:
+    """Drop rows and/or columns that contain no *content* (see :func:`_df_cell_has_content`)."""
+    if df.empty:
+        return df
+    out = df
+    if trim_rows:
+        arr = out.to_numpy(dtype=object, copy=False)
+        row_ok = np.vectorize(_df_cell_has_content)(arr).any(axis=1)
+        if not row_ok.all():
+            out = out.loc[row_ok].reset_index(drop=True)
+    if trim_cols and len(out.columns) > 0:
+        arr = out.to_numpy(dtype=object, copy=False)
+        col_ok = np.vectorize(_df_cell_has_content)(arr).any(axis=0)
+        if not col_ok.all():
+            out = out.loc[:, col_ok]
     return out

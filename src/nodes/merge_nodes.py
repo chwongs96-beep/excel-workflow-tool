@@ -17,6 +17,7 @@ from .utils import (
     convert_text_to_numeric,
     detect_used_range,
     detect_used_range_from_dataframe,
+    detect_used_range_from_xlsx_sheet,
     get_excel_file,
     make_unique_sheet_name,
     normalize_dataframe_for_excel,
@@ -24,13 +25,23 @@ from .utils import (
     parse_a1_range,
     read_csv_with_options,
     read_excel_with_engine,
+    restore_formula_cells,
     sanitize_sheet_name,
     sanitize_value,
+    trim_dataframe_blank_edges,
 )
 
 # Suppress warnings from pandas and openpyxl
 warnings.filterwarnings('ignore', category=UserWarning)
 warnings.filterwarnings('ignore', category=FutureWarning)
+
+# (prefer_excel_used_range, preserve_formulas, trim_blank_rows, trim_blank_columns)
+_SHEET_CLEAR_SMART_PRESETS: Dict[str, tuple[bool, bool, bool, bool]] = {
+    "recommended": (True, True, False, False),
+    "thorough_cleanup": (True, True, True, True),
+    "dataframe_only": (False, True, False, False),
+    "strict_clear": (False, False, False, False),
+}
 
 
 class StyledSheet:
@@ -870,8 +881,9 @@ class SheetClearRangeNode(BaseNode):
     node_name = "清理工作表内容"
     node_category = "灵活合并"
     node_description = (
-        "清空指定工作表中的单元格内容：支持自定义 A1 区域，或按数据表自动检测有值区域。"
-        "输出为普通数据表，不再保留原 Excel 样式。"
+        "清空工作表单元格：支持 A1 自定义、有值区域、整表。"
+        "「智能行为」提供推荐/深度清理/保守/彻底等预设；也可选「自定义」后逐项勾选。"
+        "输出为普通数据表，不保留原 Excel 样式。"
     )
     node_color = "#64748b"
 
@@ -917,6 +929,58 @@ class SheetClearRangeNode(BaseNode):
                 "default": "",
                 "placeholder": "仅“自定义”模式需要，例如 A2:H100",
             },
+            {
+                "key": "smart_preset",
+                "label": "智能行为",
+                "type": "select",
+                "options": [
+                    {
+                        "value": "recommended",
+                        "label": "推荐 — 源 xlsx 实测范围 + 保留公式（=开头）",
+                    },
+                    {
+                        "value": "thorough_cleanup",
+                        "label": "深度清理 — 推荐策略 + 删除全空行与全空列",
+                    },
+                    {
+                        "value": "dataframe_only",
+                        "label": "保守 — 仅用内存数据表测范围 + 保留公式（不读源文件）",
+                    },
+                    {
+                        "value": "strict_clear",
+                        "label": "彻底 — 范围内一律清空（含公式）、不测源 xlsx、不删空行/列",
+                    },
+                    {
+                        "value": "custom",
+                        "label": "自定义 — 由下方四个选项分别勾选",
+                    },
+                ],
+                "default": "recommended",
+            },
+            {
+                "key": "prefer_excel_used_range",
+                "label": "· 自定义：优先使用源 Excel 实测区域 (.xlsx)",
+                "type": "checkbox",
+                "default": True,
+            },
+            {
+                "key": "preserve_formulas",
+                "label": "· 自定义：保留公式单元格 (= 开头不清除)",
+                "type": "checkbox",
+                "default": True,
+            },
+            {
+                "key": "trim_blank_rows",
+                "label": "· 自定义：清理后删除整行无内容的行",
+                "type": "checkbox",
+                "default": False,
+            },
+            {
+                "key": "trim_blank_columns",
+                "label": "· 自定义：清理后删除整列无内容的列",
+                "type": "checkbox",
+                "default": False,
+            },
         ]
 
     def validate(self) -> tuple[bool, str]:
@@ -928,6 +992,32 @@ class SheetClearRangeNode(BaseNode):
             if not (self.get_param("range_a1") or "").strip():
                 return False, "自定义模式请填写 Excel 区域"
         return True, ""
+
+    def _resolve_smart_options_live(self) -> tuple[bool, bool, bool, bool]:
+        # Workflows saved before smart_preset existed: keep per-checkbox behavior
+        if "smart_preset" not in self.config.params:
+            return (
+                bool(self.get_param("prefer_excel_used_range", True)),
+                bool(self.get_param("preserve_formulas", True)),
+                bool(self.get_param("trim_blank_rows", False)),
+                bool(self.get_param("trim_blank_columns", False)),
+            )
+        preset = str(self.get_param("smart_preset", "recommended") or "recommended")
+        if preset == "custom":
+            return (
+                bool(self.get_param("prefer_excel_used_range", True)),
+                bool(self.get_param("preserve_formulas", True)),
+                bool(self.get_param("trim_blank_rows", False)),
+                bool(self.get_param("trim_blank_columns", False)),
+            )
+        if preset in _SHEET_CLEAR_SMART_PRESETS:
+            return _SHEET_CLEAR_SMART_PRESETS[preset]
+        return (
+            bool(self.get_param("prefer_excel_used_range", True)),
+            bool(self.get_param("preserve_formulas", True)),
+            bool(self.get_param("trim_blank_rows", False)),
+            bool(self.get_param("trim_blank_columns", False)),
+        )
 
     @staticmethod
     def _workbook_item_to_dataframe(item: Any) -> pd.DataFrame:
@@ -963,6 +1053,9 @@ class SheetClearRangeNode(BaseNode):
         sheet_name_param = (self.get_param("sheet_name") or "").strip()
         clear_mode = self.get_param("clear_mode", "used_range")
         range_a1 = (self.get_param("range_a1") or "").strip()
+        prefer_excel, preserve_formulas, trim_rows, trim_cols = (
+            self._resolve_smart_options_live()
+        )
 
         if target_scope == "single":
             if not sheet_name_param:
@@ -974,6 +1067,13 @@ class SheetClearRangeNode(BaseNode):
         else:
             keys = list(workbook.keys())
 
+        if "smart_preset" in self.config.params:
+            self.report_progress(
+                f"智能行为: {self.get_param('smart_preset', 'recommended')} "
+                f"(源xlsx={prefer_excel}, 保留公式={preserve_formulas}, "
+                f"删全空行={trim_rows}, 删全空列={trim_cols})",
+            )
+
         for key in keys:
             item = workbook[key]
             try:
@@ -983,6 +1083,8 @@ class SheetClearRangeNode(BaseNode):
 
             nrows = len(df)
             ncols = len(df.columns)
+            df_orig_formulas = df.copy() if preserve_formulas else None
+            bounds_note = ""
 
             if clear_mode == "custom":
                 min_r, max_r, min_c, max_c = parse_a1_range(range_a1)
@@ -991,7 +1093,18 @@ class SheetClearRangeNode(BaseNode):
                     df, min_r, max_r, min_c, max_c, clear_header_cells=clear_headers,
                 )
             elif clear_mode == "used_range":
-                min_r, max_r, min_c, max_c = detect_used_range_from_dataframe(df)
+                native_bounds = None
+                if prefer_excel and isinstance(item, StyledSheet):
+                    native_bounds = detect_used_range_from_xlsx_sheet(
+                        item.file_path, item.sheet_name,
+                    )
+                if native_bounds is not None:
+                    min_r, max_r, min_c, max_c = native_bounds
+                    bounds_note = " (范围:源xlsx)"
+                else:
+                    min_r, max_r, min_c, max_c = detect_used_range_from_dataframe(df)
+                    bounds_note = " (范围:数据表)"
+
                 if ncols == 0 or ((min_r, max_r, min_c, max_c) == (1, 1, 1, 1) and nrows == 0):
                     cleared = df.copy()
                 else:
@@ -1017,9 +1130,18 @@ class SheetClearRangeNode(BaseNode):
             else:
                 raise ValueError(f"未知的清理模式: {clear_mode}")
 
+            if preserve_formulas and df_orig_formulas is not None:
+                cleared = restore_formula_cells(df_orig_formulas, cleared)
+
+            if trim_rows or trim_cols:
+                cleared = trim_dataframe_blank_edges(
+                    cleared, trim_rows=trim_rows, trim_cols=trim_cols,
+                )
+
             workbook[key] = clean_unnamed_columns(cleared)
             self.report_progress(
-                f"已清理「{key}」: 模式={clear_mode}, 形状={len(workbook[key])}×{len(workbook[key].columns)}",
+                f"已清理「{key}」: 模式={clear_mode}{bounds_note}, "
+                f"形状={len(workbook[key])}×{len(workbook[key].columns)}",
             )
 
         return {"workbook": workbook}
